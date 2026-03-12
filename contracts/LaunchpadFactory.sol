@@ -132,6 +132,14 @@ contract LaunchpadFactory {
         uint256      customVirtualBNBUSD;      // 0 → use factory default ($2 000)
         uint256      customMigrationTargetUSD; // 0 → use factory default ($11 000)
         /**
+         * @notice Off-chain metadata URI for the token (IPFS, HTTPS, etc.).
+         *         Expected JSON shape: { name, description, image, external_link }
+         *         Can be updated post-deployment via token.setMetaURI().
+         *         Empty string is valid (no metadata).
+         */
+        string       metaURI;
+
+        /**
          * @notice User-supplied salt component for CREATE2 vanity addressing.
          *         Mine off-chain via `predictTokenAddress` until the address
          *         ends in 0x1111.  The actual CREATE2 salt is derived as
@@ -485,7 +493,7 @@ contract LaunchpadFactory {
         (uint256 supply, uint256 liqTokens, uint256 creatorTokens, uint256 bcTokens)
             = _computeAlloc(_supplyFromOption(p.supplyOption), p.enableCreatorAlloc);
 
-        StandardToken(token).initForLaunchpad(p.name, p.symbol, supply, address(this), msg.sender);
+        StandardToken(token).initForLaunchpad(p.name, p.symbol, supply, address(this), msg.sender, p.metaURI);
         _registerToken(token, TokenType.STANDARD, supply, liqTokens, creatorTokens, bcTokens, p);
 
         if (earlyBuy > 0) _executeBuy(token, msg.sender, earlyBuy, 0, true);
@@ -507,7 +515,7 @@ contract LaunchpadFactory {
 
         TaxToken(token).initForLaunchpad(
             p.base.name, p.base.symbol, supply, address(this),
-            p.wallets, p.buyTaxes, p.sellTaxes, p.swapThreshold, msg.sender
+            p.wallets, p.buyTaxes, p.sellTaxes, p.swapThreshold, msg.sender, p.base.metaURI
         );
         _registerToken(token, TokenType.TAX, supply, liqTokens, creatorTokens, bcTokens, p.base);
 
@@ -530,7 +538,7 @@ contract LaunchpadFactory {
 
         ReflectionToken(token).initForLaunchpad(
             p.base.name, p.base.symbol, supply, address(this),
-            p.wallets, p.buyTaxes, p.sellTaxes, p.swapThreshold, msg.sender
+            p.wallets, p.buyTaxes, p.sellTaxes, p.swapThreshold, msg.sender, p.base.metaURI
         );
         _registerToken(token, TokenType.REFLECTION, supply, liqTokens, creatorTokens, bcTokens, p.base);
 

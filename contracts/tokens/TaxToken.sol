@@ -53,6 +53,7 @@ contract TaxToken is ILaunchpadToken {
     // ─── ERC-20 metadata ────────────────────────────────────────────────
     string  private _name;
     string  private _symbol;
+    string  private _metaURI;
     uint8   private constant DECIMALS = 18;
     uint256 private _totalSupply;
 
@@ -106,6 +107,7 @@ contract TaxToken is ILaunchpadToken {
     event SellTaxesUpdated(uint256 marketing, uint256 team, uint256 treasury, uint256 burn, uint256 lp);
     event SwapAndLiquify(uint256 tokensSwapped, uint256 bnbReceived);
     event TradingEnabled(address pair, address router);
+    event MetaURIUpdated(string uri);
     event VestingSetup(address indexed creator, uint256 amount);
     event VestingClaimed(address indexed creator, uint256 amount);
 
@@ -135,7 +137,8 @@ contract TaxToken is ILaunchpadToken {
         uint256[5] calldata buyTaxes_,
         uint256[5] calldata sellTaxes_,
         uint256            swapThreshold_,
-        address            tokenOwner_
+        address            tokenOwner_,
+        string    calldata metaURI_
     ) external {
         if (_initialized) revert AlreadyInitialized();
         if (factory_    == address(0)) revert ZeroAddress();
@@ -179,10 +182,25 @@ contract TaxToken is ILaunchpadToken {
         _isExcludedFromFee[wallets_[2]]    = true;
         _isExcludedFromFee[BURN_ADDRESS]   = true;
 
+        _metaURI = metaURI_;
+
         // Mint entire supply to factory
         _balances[factory_] = totalSupply_;
         emit Transfer(address(0), factory_, totalSupply_);
         emit OwnershipTransferred(address(0), tokenOwner_);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // METADATA URI
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// @notice Off-chain metadata URI — JSON with name, description, image, website, etc.
+    function metaURI() external view override returns (string memory) { return _metaURI; }
+
+    /// @notice Update the metadata URI.  Callable only by the token owner.
+    function setMetaURI(string calldata uri_) external override onlyOwner {
+        _metaURI = uri_;
+        emit MetaURIUpdated(uri_);
     }
 
     /**

@@ -23,6 +23,9 @@ contract StandardToken is ILaunchpadToken {
     mapping(address => uint256)                     private _balances;
     mapping(address => mapping(address => uint256)) private _allowances;
 
+    // ─── Token metadata URI ───────────────────────────────────────────────
+    string private _metaURI;
+
     // ─── Creator vesting (token contract is its own escrow) ───────────────
     address public vestingCreator;
     uint256 public vestingTotal;
@@ -33,6 +36,7 @@ contract StandardToken is ILaunchpadToken {
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
     event OwnershipTransferred(address indexed prev, address indexed next);
+    event MetaURIUpdated(string uri);
     event VestingSetup(address indexed creator, uint256 amount);
     event VestingClaimed(address indexed owner, uint256 amount);
 
@@ -62,7 +66,8 @@ contract StandardToken is ILaunchpadToken {
         string  calldata symbol_,
         uint256          totalSupply_,
         address          factory_,
-        address          tokenOwner_
+        address          tokenOwner_,
+        string  calldata metaURI_
     ) external {
         require(!_initialized,          "Already initialized");
         require(factory_    != address(0), "Zero factory");
@@ -75,6 +80,7 @@ contract StandardToken is ILaunchpadToken {
         _symbol      = symbol_;
         _totalSupply = totalSupply_;
 
+        _metaURI     = metaURI_;
         _balances[factory_] = totalSupply_;
         emit Transfer(address(0), factory_, totalSupply_);
         emit OwnershipTransferred(address(0), tokenOwner_);
@@ -85,6 +91,19 @@ contract StandardToken is ILaunchpadToken {
      *         unlock.  Exists only to satisfy the ILaunchpadToken interface.
      */
     function enableTrading(address, address) external override onlyFactory {}
+
+    // ─────────────────────────────────────────────────────────────────────
+    // METADATA URI
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// @notice Off-chain metadata URI — JSON with name, description, image, website, etc.
+    function metaURI() external view override returns (string memory) { return _metaURI; }
+
+    /// @notice Update the metadata URI.  Callable only by the token owner.
+    function setMetaURI(string calldata uri_) external override onlyOwner {
+        _metaURI = uri_;
+        emit MetaURIUpdated(uri_);
+    }
 
     /**
      * @notice Called once by the factory after it has transferred the creator

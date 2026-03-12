@@ -58,6 +58,7 @@ contract ReflectionToken is ILaunchpadToken {
     // ─── ERC-20 metadata ────────────────────────────────────────────────
     string  private _name;
     string  private _symbol;
+    string  private _metaURI;
     uint8   private constant DECIMALS = 18;
 
     // ─── reflection accounting ──────────────────────────────────────────
@@ -120,6 +121,7 @@ contract ReflectionToken is ILaunchpadToken {
     event ExcludedFromReflection(address indexed account);
     event IncludedInReflection(address indexed account);
     event TradingEnabled(address pair, address router);
+    event MetaURIUpdated(string uri);
     event VestingSetup(address indexed creator, uint256 amount);
     event VestingClaimed(address indexed creator, uint256 amount);
 
@@ -146,7 +148,8 @@ contract ReflectionToken is ILaunchpadToken {
         uint256[5] calldata buyTaxes_,
         uint256[5] calldata sellTaxes_,
         uint256            swapThreshold_,
-        address            tokenOwner_
+        address            tokenOwner_,
+        string    calldata metaURI_
     ) external {
         if (_initialized) revert AlreadyInitialized();
         if (factory_    == address(0)) revert ZeroAddress();
@@ -193,8 +196,23 @@ contract ReflectionToken is ILaunchpadToken {
         _excludeFromReflectionInternal(address(this));
         _excludeFromReflectionInternal(BURN_ADDRESS);
 
+        _metaURI = metaURI_;
+
         emit Transfer(address(0), factory_, _tTotal);
         emit OwnershipTransferred(address(0), tokenOwner_);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // METADATA URI
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// @notice Off-chain metadata URI — JSON with name, description, image, website, etc.
+    function metaURI() external view override returns (string memory) { return _metaURI; }
+
+    /// @notice Update the metadata URI.  Callable only by the token owner.
+    function setMetaURI(string calldata uri_) external override onlyOwner {
+        _metaURI = uri_;
+        emit MetaURIUpdated(uri_);
     }
 
     /**

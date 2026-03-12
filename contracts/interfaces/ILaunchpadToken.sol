@@ -15,6 +15,14 @@ interface ILaunchpadToken {
     ///         `amount_` tokens to this contract before calling.
     function setupVesting(address creator_, uint256 amount_) external;
 
+    // ── Metadata URI ──────────────────────────────────────────────────────
+    /// @notice Returns the token's off-chain metadata URI (JSON with name,
+    ///         description, image, website, etc.).  Empty string if unset.
+    function metaURI() external view returns (string memory);
+
+    /// @notice Update the metadata URI.  Callable only by the token owner.
+    function setMetaURI(string calldata uri_) external;
+
     // ── ERC-20 surface the factory needs ──────────────────────────────────
     function totalSupply() external view returns (uint256);
     function balanceOf(address account) external view returns (uint256);
