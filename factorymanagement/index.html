@@ -1,0 +1,811 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OneMEME — Factory Management</title>
+  <script src="https://cdn.jsdelivr.net/npm/ethers@6.13.4/dist/ethers.umd.min.js"></script>
+  <style>
+    /* ── Reset & Base ──────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:       #0d0d0f;
+      --surface:  #141417;
+      --border:   #242428;
+      --accent:   #f0b90b;   /* BNB yellow */
+      --accent2:  #e8a800;
+      --danger:   #e05252;
+      --ok:       #42b883;
+      --text:     #e8e8ed;
+      --muted:    #7a7a8a;
+      --radius:   10px;
+      --gap:      16px;
+    }
+
+    body {
+      font-family: 'Inter', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    /* ── Layout ────────────────────────────────────────────────────── */
+    .shell {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 0 var(--gap) 60px;
+    }
+
+    /* ── Header ────────────────────────────────────────────────────── */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+      padding: 20px 0 18px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 28px;
+    }
+    .logo { font-size: 18px; font-weight: 700; letter-spacing: -.3px; }
+    .logo span { color: var(--accent); }
+
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    #factoryInput {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text);
+      padding: 7px 12px;
+      font-size: 13px;
+      width: 340px;
+      font-family: monospace;
+    }
+    #factoryInput::placeholder { color: var(--muted); }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--accent);
+      color: #0d0d0f;
+      border: none;
+      border-radius: var(--radius);
+      padding: 8px 16px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .15s;
+    }
+    .btn:hover { background: var(--accent2); }
+    .btn:disabled { opacity: .45; cursor: not-allowed; }
+    .btn.secondary {
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .btn.secondary:hover { border-color: var(--accent); color: var(--accent); }
+    .btn.danger { background: var(--danger); color: #fff; }
+    .btn.danger:hover { background: #c94444; }
+    .btn.small { padding: 5px 11px; font-size: 12px; }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 12px;
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-weight: 600;
+    }
+    .badge.owner  { background: #f0b90b22; color: var(--accent); border: 1px solid #f0b90b44; }
+    .badge.wallet { background: #42b88322; color: var(--ok);    border: 1px solid #42b88344; }
+    .badge.disconnected { background: #e0525222; color: var(--danger); border: 1px solid #e0525244; }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+
+    /* ── Toast ─────────────────────────────────────────────────────── */
+    #toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      max-width: 380px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px 16px;
+      font-size: 13px;
+      z-index: 999;
+      display: none;
+      word-break: break-all;
+    }
+    #toast.ok     { border-color: var(--ok);     color: var(--ok); }
+    #toast.err    { border-color: var(--danger);  color: var(--danger); }
+    #toast.info   { border-color: var(--accent);  color: var(--accent); }
+
+    /* ── Section headings ──────────────────────────────────────────── */
+    .section-title {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .8px;
+      color: var(--muted);
+      margin: 28px 0 12px;
+    }
+
+    /* ── Grid of stat/config cards ─────────────────────────────────── */
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+      gap: var(--gap);
+    }
+    .stat-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px 16px;
+    }
+    .stat-card .label {
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: .5px;
+      margin-bottom: 6px;
+    }
+    .stat-card .value {
+      font-size: 15px;
+      font-weight: 600;
+      word-break: break-all;
+      font-family: monospace;
+    }
+    .stat-card .value.mono-sm { font-size: 12px; }
+    .stat-card .value.accent  { color: var(--accent); }
+    .stat-card .value.ok      { color: var(--ok); }
+    .stat-card .value.danger  { color: var(--danger); }
+
+    /* ── Action cards ───────────────────────────────────────────────── */
+    .action-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
+      gap: var(--gap);
+    }
+    .action-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px;
+    }
+    .action-card h3 {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+    .action-card .desc {
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 14px;
+    }
+
+    .field { margin-bottom: 10px; }
+    .field label {
+      display: block;
+      font-size: 11px;
+      color: var(--muted);
+      margin-bottom: 4px;
+      text-transform: uppercase;
+      letter-spacing: .4px;
+    }
+    .field input, .field select {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      color: var(--text);
+      padding: 7px 10px;
+      font-size: 13px;
+      font-family: monospace;
+      outline: none;
+      transition: border-color .15s;
+    }
+    .field input:focus, .field select:focus { border-color: var(--accent); }
+    .field input::placeholder { color: var(--muted); }
+    .field select option { background: var(--bg); }
+
+    .action-card .btn { width: 100%; justify-content: center; margin-top: 4px; }
+
+    /* ── TWAP status bar ────────────────────────────────────────────── */
+    .twap-bar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px 16px;
+      margin-bottom: var(--gap);
+      flex-wrap: wrap;
+    }
+    .twap-bar .item { font-size: 12px; color: var(--muted); }
+    .twap-bar .item strong { color: var(--text); }
+    .twap-bar .sep { color: var(--border); }
+
+    /* ── Registry table ─────────────────────────────────────────────── */
+    .registry {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+    .registry-search {
+      display: flex;
+      gap: 10px;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--border);
+    }
+    .registry-search input {
+      flex: 1;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      color: var(--text);
+      padding: 7px 10px;
+      font-size: 13px;
+      font-family: monospace;
+    }
+    .registry-search input:focus { outline: none; border-color: var(--accent); }
+    .token-list { padding: 6px 0; max-height: 280px; overflow-y: auto; }
+    .token-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 16px;
+      font-size: 12px;
+      font-family: monospace;
+      border-bottom: 1px solid var(--border);
+      gap: 10px;
+    }
+    .token-row:last-child { border-bottom: none; }
+    .token-row:hover { background: #ffffff06; }
+    .token-row .addr { color: var(--text); }
+    .token-row .idx  { color: var(--muted); min-width: 32px; }
+    .token-row .type { color: var(--accent); font-size: 11px; background: #f0b90b15; padding: 2px 7px; border-radius: 4px; }
+    .token-list-empty { padding: 24px; text-align: center; color: var(--muted); font-size: 13px; }
+
+    /* ── Loading spinner ────────────────────────────────────────────── */
+    .spinner {
+      width: 14px; height: 14px;
+      border: 2px solid currentColor;
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: spin .7s linear infinite;
+      display: inline-block;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Owner-only overlay ─────────────────────────────────────────── */
+    .owner-only-overlay {
+      position: relative;
+    }
+    .owner-only-overlay::after {
+      content: '🔒 Owner only';
+      position: absolute;
+      inset: 0;
+      background: #0d0d0fcc;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 13px;
+      color: var(--muted);
+      border-radius: var(--radius);
+      pointer-events: all;
+    }
+    .owner-only-overlay.unlocked::after { display: none; }
+    .owner-only-overlay.unlocked { pointer-events: auto; }
+
+    /* ── Misc ───────────────────────────────────────────────────────── */
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    hr.divider { border: none; border-top: 1px solid var(--border); margin: 8px 0; }
+  </style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- Header -->
+  <header>
+    <div class="logo">One<span>MEME</span> <span style="color:var(--muted);font-weight:400;font-size:14px">/ Factory Management</span></div>
+    <div class="header-right">
+      <input id="factoryInput" type="text" placeholder="Factory contract address (0x…)" spellcheck="false" />
+      <button class="btn secondary" id="loadBtn">Load</button>
+      <button class="btn" id="connectBtn">Connect Wallet</button>
+      <span id="walletBadge" class="badge disconnected"><span class="dot"></span>Disconnected</span>
+    </div>
+  </header>
+
+  <!-- TWAP status bar -->
+  <div class="twap-bar" id="twapBar" style="display:none">
+    <div class="item">TWAP Price: <strong id="twapPrice">—</strong></div>
+    <div class="sep">|</div>
+    <div class="item">Last Success Block: <strong id="twapBlock">—</strong></div>
+    <div class="sep">|</div>
+    <div class="item">Age: <strong id="twapAge" style="color:var(--ok)">—</strong></div>
+    <div class="sep">|</div>
+    <div class="item">Max Age: <strong id="twapMaxAge">—</strong> blocks</div>
+    <div style="margin-left:auto">
+      <button class="btn small" id="twapUpdateBtn">Update TWAP</button>
+    </div>
+  </div>
+
+  <!-- Overview stats -->
+  <div id="overviewSection" style="display:none">
+    <div class="section-title">Overview</div>
+    <div class="stat-grid">
+      <div class="stat-card">
+        <div class="label">Owner</div>
+        <div class="value mono-sm" id="statOwner">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Fee Recipient</div>
+        <div class="value mono-sm" id="statFeeRecipient">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Router</div>
+        <div class="value mono-sm" id="statRouter">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Trade Fee</div>
+        <div class="value accent" id="statTradeFee">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Creation Fee</div>
+        <div class="value accent" id="statCreationFee">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Accumulated Fees</div>
+        <div class="value ok" id="statFees">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Total Tokens Launched</div>
+        <div class="value accent" id="statTotal">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Default Virtual BNB</div>
+        <div class="value" id="statVBNB">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Migration Target</div>
+        <div class="value" id="statMigTarget">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">USDC Token</div>
+        <div class="value mono-sm" id="statUsdc">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">USDC/WBNB Pair</div>
+        <div class="value mono-sm" id="statPair">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Implementations</div>
+        <div class="value" style="font-size:11px;line-height:1.8">
+          <div>STD: <span id="implStd" style="font-family:monospace">—</span></div>
+          <div>TAX: <span id="implTax" style="font-family:monospace">—</span></div>
+          <div>RFL: <span id="implRfl" style="font-family:monospace">—</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Owner Actions -->
+  <div id="adminSection" style="display:none">
+    <div class="section-title">Owner Actions</div>
+    <div class="action-grid">
+
+      <!-- Set Router -->
+      <div class="action-card owner-only-overlay" id="cardRouter">
+        <h3>Update Router</h3>
+        <div class="desc">Change the PancakeSwap V2 router used for migration.</div>
+        <div class="field"><label>New Router Address</label><input id="inRouter" type="text" placeholder="0x…" /></div>
+        <button class="btn" onclick="exec('setRouter', [get('inRouter')])">Set Router</button>
+      </div>
+
+      <!-- Set Fee Recipient -->
+      <div class="action-card owner-only-overlay" id="cardFeeRec">
+        <h3>Update Fee Recipient</h3>
+        <div class="desc">Address that accumulates platform fees (creation + trade).</div>
+        <div class="field"><label>New Recipient Address</label><input id="inFeeRec" type="text" placeholder="0x…" /></div>
+        <button class="btn" onclick="exec('setFeeRecipient', [get('inFeeRec')])">Set Fee Recipient</button>
+      </div>
+
+      <!-- Set Trade Fee -->
+      <div class="action-card owner-only-overlay" id="cardTradeFee">
+        <h3>Update Trade Fee</h3>
+        <div class="desc">Fee on each buy/sell (in BPS, max 500 = 5 %). Default: 100 (1 %).</div>
+        <div class="field">
+          <label>Fee (BPS)</label>
+          <input id="inTradeFee" type="number" placeholder="100" min="0" max="500" />
+        </div>
+        <button class="btn" onclick="exec('setTradeFee', [BigInt(get('inTradeFee'))])">Set Trade Fee</button>
+      </div>
+
+      <!-- Set Creation Fee USD -->
+      <div class="action-card owner-only-overlay" id="cardCreFee">
+        <h3>Update Creation Fee</h3>
+        <div class="desc">Fee charged to launch a new token, denominated in USD (18-dec). Default: $1.</div>
+        <div class="field"><label>Amount in USD</label><input id="inCreFeeUSD" type="number" placeholder="1" step="0.01" min="0.01" /></div>
+        <button class="btn" onclick="execCreationFee()">Set Creation Fee</button>
+      </div>
+
+      <!-- Set USDC Pair -->
+      <div class="action-card owner-only-overlay" id="cardUsdcPair">
+        <h3>Update USDC Oracle Pair</h3>
+        <div class="desc">Swap the TWAP oracle pair. <code>isToken0</code> is derived on-chain. Resets TWAP state.</div>
+        <div class="field"><label>USDC Token Address</label><input id="inUsdcToken" type="text" placeholder="0x…" /></div>
+        <div class="field"><label>USDC/WBNB Pair Address</label><input id="inUsdcPair" type="text" placeholder="0x…" /></div>
+        <div class="field">
+          <label>USDC Decimals</label>
+          <select id="inUsdcDec">
+            <option value="6">6 — Circle USDC</option>
+            <option value="18">18 — Binance-peg BUSD/USDT</option>
+          </select>
+        </div>
+        <button class="btn" onclick="exec('setUsdcPair', [get('inUsdcToken'), get('inUsdcPair'), parseInt(get('inUsdcDec'))])">Set USDC Pair</button>
+      </div>
+
+      <!-- Set TWAP Max Age -->
+      <div class="action-card owner-only-overlay" id="cardTwapAge">
+        <h3>TWAP Max Age (Blocks)</h3>
+        <div class="desc">Max blocks since last successful TWAP refresh before it's considered stale. Default: 1440 (~2 h).</div>
+        <div class="field"><label>Blocks (min 60)</label><input id="inTwapAge" type="number" placeholder="1440" min="60" /></div>
+        <button class="btn" onclick="exec('setTwapMaxAgeBlocks', [BigInt(get('inTwapAge'))])">Set Max Age</button>
+      </div>
+
+      <!-- Set Default Params -->
+      <div class="action-card owner-only-overlay" id="cardDefaults">
+        <h3>Default Bonding-Curve Params</h3>
+        <div class="desc">Virtual BNB and migration target used when a token creator doesn't override them.</div>
+        <div class="field"><label>Virtual BNB USD ($)</label><input id="inVBNB" type="number" placeholder="2000" step="1" /></div>
+        <div class="field"><label>Migration Target USD ($)</label><input id="inMigTarget" type="number" placeholder="11000" step="1" /></div>
+        <button class="btn" onclick="execDefaultParams()">Set Defaults</button>
+      </div>
+
+      <!-- Withdraw Fees -->
+      <div class="action-card owner-only-overlay" id="cardWithdraw">
+        <h3>Withdraw Accumulated Fees</h3>
+        <div class="desc">Push all collected BNB fees to the current fee recipient.</div>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+          <span style="color:var(--muted);font-size:12px">Available:</span>
+          <span style="color:var(--ok);font-weight:700;font-size:15px" id="withdrawBal">— BNB</span>
+        </div>
+        <button class="btn ok" style="background:var(--ok);color:#0d0d0f" onclick="exec('withdrawFees', [])">Withdraw Fees</button>
+      </div>
+
+      <!-- Transfer Ownership -->
+      <div class="action-card owner-only-overlay" id="cardOwnership">
+        <h3>Transfer Ownership</h3>
+        <div class="desc">Transfer factory admin rights. <span style="color:var(--danger)">Irreversible.</span></div>
+        <div class="field"><label>New Owner Address</label><input id="inNewOwner" type="text" placeholder="0x…" /></div>
+        <button class="btn danger" onclick="execTransferOwnership()">Transfer Ownership</button>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Token Registry -->
+  <div id="registrySection" style="display:none">
+    <div class="section-title">Token Registry</div>
+    <div class="registry">
+      <div class="registry-search">
+        <input id="creatorSearch" type="text" placeholder="Search by creator address (0x…)" spellcheck="false" />
+        <button class="btn" onclick="searchByCreator()">Search</button>
+        <button class="btn secondary" onclick="loadAllTokens()">All Tokens</button>
+      </div>
+      <div class="token-list" id="tokenList">
+        <div class="token-list-empty">Load a factory to browse tokens.</div>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /shell -->
+
+<!-- Toast -->
+<div id="toast"></div>
+
+<script>
+// ── State ────────────────────────────────────────────────────────────────────
+let provider, signer, signerAddr, contract, readContract;
+let factoryAddr = '';
+let currentBlock = 0;
+
+// ── ABI ──────────────────────────────────────────────────────────────────────
+const ABI = [
+  // Read
+  "function owner() view returns (address)",
+  "function pancakeRouter() view returns (address)",
+  "function feeRecipient() view returns (address)",
+  "function tradeFee() view returns (uint256)",
+  "function creationFeeUSD() view returns (uint256)",
+  "function usdcToken() view returns (address)",
+  "function usdcWbnbPair() view returns (address)",
+  "function usdcIsToken0() view returns (bool)",
+  "function usdcDecimals() view returns (uint8)",
+  "function twapPriceAvg() view returns (uint256)",
+  "function twapLastSuccessBlock() view returns (uint256)",
+  "function twapMaxAgeBlocks() view returns (uint256)",
+  "function accumulatedFees() view returns (uint256)",
+  "function defaultVirtualBNBUSD() view returns (uint256)",
+  "function defaultMigrationTargetUSD() view returns (uint256)",
+  "function totalTokensLaunched() view returns (uint256)",
+  "function standardImpl() view returns (address)",
+  "function taxImpl() view returns (address)",
+  "function reflectionImpl() view returns (address)",
+  "function getTokensByCreator(address) view returns (address[])",
+  "function tokenCountByCreator(address) view returns (uint256)",
+  "function allTokens(uint256) view returns (address)",
+  "function tokens(address) view returns (address,uint8,address,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,bool,uint256,uint256,bool)",
+  // Write
+  "function setRouter(address)",
+  "function setFeeRecipient(address)",
+  "function setTradeFee(uint256)",
+  "function setCreationFeeUSD(uint256)",
+  "function setUsdcPair(address,address,uint8)",
+  "function setTwapMaxAgeBlocks(uint256)",
+  "function setDefaultParams(uint256,uint256)",
+  "function withdrawFees()",
+  "function transferOwnership(address)",
+  "function updateTWAP()",
+];
+
+const TOKEN_TYPES = ['STANDARD', 'TAX', 'REFLECTION'];
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+const get = id => document.getElementById(id).value.trim();
+const el  = id => document.getElementById(id);
+
+function toast(msg, type = 'info', ms = 4500) {
+  const t = el('toast');
+  t.textContent = msg;
+  t.className = type;
+  t.style.display = 'block';
+  clearTimeout(t._to);
+  t._to = setTimeout(() => { t.style.display = 'none'; }, ms);
+}
+
+function short(addr) {
+  if (!addr || addr === ethers.ZeroAddress) return '—';
+  return addr.slice(0,8) + '…' + addr.slice(-6);
+}
+
+function fmt18(val) {
+  return (Number(val) / 1e18).toLocaleString(undefined, { maximumFractionDigits: 4 });
+}
+
+// ── Wallet ────────────────────────────────────────────────────────────────────
+el('connectBtn').addEventListener('click', async () => {
+  if (!window.ethereum) return toast('No wallet detected.', 'err');
+  try {
+    provider = new ethers.BrowserProvider(window.ethereum);
+    await provider.send('eth_requestAccounts', []);
+    signer    = await provider.getSigner();
+    signerAddr = await signer.getAddress();
+    el('walletBadge').className = 'badge wallet';
+    el('walletBadge').innerHTML = `<span class="dot"></span>${short(signerAddr)}`;
+    el('connectBtn').textContent = 'Connected';
+    if (factoryAddr) wireContracts();
+  } catch(e) { toast(e.message, 'err'); }
+});
+
+// ── Load Factory ──────────────────────────────────────────────────────────────
+el('loadBtn').addEventListener('click', async () => {
+  const addr = get('factoryInput');
+  if (!ethers.isAddress(addr)) return toast('Enter a valid contract address.', 'err');
+  if (!provider) {
+    // read-only fallback — BSC mainnet public RPC
+    provider = new ethers.JsonRpcProvider('https://bsc-dataseed.binance.org');
+  }
+  factoryAddr = addr;
+  wireContracts();
+  await loadAll();
+});
+
+function wireContracts() {
+  readContract = new ethers.Contract(factoryAddr, ABI, provider);
+  if (signer) contract = new ethers.Contract(factoryAddr, ABI, signer);
+}
+
+// ── Load all state ────────────────────────────────────────────────────────────
+async function loadAll() {
+  toast('Loading factory state…', 'info');
+  try {
+    currentBlock = await provider.getBlockNumber();
+    const [
+      owner, router, feeRec, tradeFee, creFeeUSD,
+      usdcTok, usdcPair, twapAvg, twapBlock, twapMax,
+      accFees, vBNBusd, mTgtusd, total,
+      implStd, implTax, implRfl,
+    ] = await Promise.all([
+      readContract.owner(),
+      readContract.pancakeRouter(),
+      readContract.feeRecipient(),
+      readContract.tradeFee(),
+      readContract.creationFeeUSD(),
+      readContract.usdcToken(),
+      readContract.usdcWbnbPair(),
+      readContract.twapPriceAvg(),
+      readContract.twapLastSuccessBlock(),
+      readContract.twapMaxAgeBlocks(),
+      readContract.accumulatedFees(),
+      readContract.defaultVirtualBNBUSD(),
+      readContract.defaultMigrationTargetUSD(),
+      readContract.totalTokensLaunched(),
+      readContract.standardImpl(),
+      readContract.taxImpl(),
+      readContract.reflectionImpl(),
+    ]);
+
+    // Stats
+    el('statOwner').textContent = short(owner);
+    el('statOwner').title       = owner;
+    el('statFeeRecipient').textContent = short(feeRec);
+    el('statFeeRecipient').title = feeRec;
+    el('statRouter').textContent = short(router);
+    el('statRouter').title = router;
+    el('statTradeFee').textContent = `${Number(tradeFee) / 100} %  (${tradeFee} BPS)`;
+    el('statCreationFee').textContent = `$${fmt18(creFeeUSD)} USD`;
+    el('statFees').textContent = `${ethers.formatEther(accFees)} BNB`;
+    el('statTotal').textContent = total.toString();
+    el('statVBNB').textContent = `$${fmt18(vBNBusd)}`;
+    el('statMigTarget').textContent = `$${fmt18(mTgtusd)}`;
+    el('statUsdc').textContent = short(usdcTok);
+    el('statUsdc').title = usdcTok;
+    el('statPair').textContent = short(usdcPair);
+    el('statPair').title = usdcPair;
+    el('implStd').textContent = short(implStd);
+    el('implTax').textContent = short(implTax);
+    el('implRfl').textContent = short(implRfl);
+    el('withdrawBal').textContent = `${ethers.formatEther(accFees)} BNB`;
+
+    // TWAP bar
+    const age = currentBlock - Number(twapBlock);
+    const stale = age > Number(twapMax);
+    el('twapPrice').textContent = twapAvg > 0n ? `UQ112 ${twapAvg.toString().slice(0,10)}…` : 'Not initialized';
+    el('twapBlock').textContent = twapBlock.toString();
+    el('twapAge').textContent   = `${age} blocks`;
+    el('twapAge').style.color   = stale ? 'var(--danger)' : 'var(--ok)';
+    el('twapMaxAge').textContent = twapMax.toString();
+
+    // Owner gating
+    const isOwner = signerAddr && owner.toLowerCase() === signerAddr.toLowerCase();
+    document.querySelectorAll('.owner-only-overlay').forEach(card => {
+      card.classList.toggle('unlocked', isOwner);
+    });
+
+    // Show sections
+    el('overviewSection').style.display = '';
+    el('adminSection').style.display    = '';
+    el('registrySection').style.display = '';
+    el('twapBar').style.display         = '';
+
+    // Pre-fill defaults
+    el('inTradeFee').placeholder = tradeFee.toString();
+    el('inCreFeeUSD').placeholder = fmt18(creFeeUSD);
+    el('inVBNB').placeholder = fmt18(vBNBusd);
+    el('inMigTarget').placeholder = fmt18(mTgtusd);
+    el('inTwapAge').placeholder = twapMax.toString();
+
+    await loadAllTokens();
+    toast('Factory loaded.', 'ok');
+  } catch(e) {
+    toast('Load failed: ' + e.message, 'err', 7000);
+    console.error(e);
+  }
+}
+
+// ── Token Registry ─────────────────────────────────────────────────────────
+async function loadAllTokens() {
+  const total = await readContract.totalTokensLaunched();
+  if (Number(total) === 0) {
+    el('tokenList').innerHTML = '<div class="token-list-empty">No tokens launched yet.</div>';
+    return;
+  }
+  const count = Math.min(Number(total), 50); // cap for performance
+  const idxs = Array.from({length: count}, (_, i) => Number(total) - 1 - i);
+  const addrs = await Promise.all(idxs.map(i => readContract.allTokens(i)));
+  renderTokenRows(addrs, idxs);
+}
+
+async function searchByCreator() {
+  const addr = get('creatorSearch');
+  if (!ethers.isAddress(addr)) return toast('Enter a valid creator address.', 'err');
+  const addrs = await readContract.getTokensByCreator(addr);
+  if (addrs.length === 0) {
+    el('tokenList').innerHTML = '<div class="token-list-empty">No tokens found for this creator.</div>';
+    return;
+  }
+  renderTokenRows([...addrs].reverse(), [...addrs.keys()].reverse());
+}
+
+function renderTokenRows(addrs, indices) {
+  el('tokenList').innerHTML = addrs.map((addr, i) => `
+    <div class="token-row">
+      <span class="idx">#${typeof indices[i] === 'number' ? indices[i] : i}</span>
+      <span class="addr">${addr}</span>
+      <a class="btn small secondary" href="#" onclick="copyAddr('${addr}');return false">Copy</a>
+    </div>
+  `).join('');
+}
+
+function copyAddr(addr) {
+  navigator.clipboard.writeText(addr).then(() => toast(`Copied: ${addr}`, 'ok', 2000));
+}
+
+// ── TWAP Update ──────────────────────────────────────────────────────────────
+el('twapUpdateBtn').addEventListener('click', () => exec('updateTWAP', []));
+
+// ── Generic Exec ─────────────────────────────────────────────────────────────
+async function exec(fn, args) {
+  if (!contract) return toast('Connect your wallet first.', 'err');
+  try {
+    toast(`Sending ${fn}…`, 'info', 99999);
+    const tx = await contract[fn](...args);
+    toast(`Tx sent: ${tx.hash.slice(0,18)}…`, 'info', 99999);
+    await tx.wait();
+    toast(`${fn} confirmed!`, 'ok');
+    await loadAll();
+  } catch(e) {
+    toast(e.reason || e.message, 'err', 8000);
+  }
+}
+
+async function execCreationFee() {
+  const v = parseFloat(get('inCreFeeUSD'));
+  if (isNaN(v) || v <= 0) return toast('Enter a valid USD amount.', 'err');
+  const wei = BigInt(Math.round(v * 1e18));
+  await exec('setCreationFeeUSD', [wei]);
+}
+
+async function execDefaultParams() {
+  const v = parseFloat(get('inVBNB'));
+  const m = parseFloat(get('inMigTarget'));
+  if (isNaN(v) || v <= 0) return toast('Enter virtual BNB USD.', 'err');
+  if (isNaN(m) || m <= 0) return toast('Enter migration target USD.', 'err');
+  const vWei = BigInt(Math.round(v * 1e18));
+  const mWei = BigInt(Math.round(m * 1e18));
+  await exec('setDefaultParams', [vWei, mWei]);
+}
+
+async function execTransferOwnership() {
+  const addr = get('inNewOwner');
+  if (!ethers.isAddress(addr)) return toast('Enter a valid address.', 'err');
+  const confirmed = window.confirm(`Transfer ownership to ${addr}?\n\nThis is irreversible.`);
+  if (!confirmed) return;
+  await exec('transferOwnership', [addr]);
+}
+
+// ── Reload on account/chain change ───────────────────────────────────────────
+if (window.ethereum) {
+  window.ethereum.on('accountsChanged', async ([acc]) => {
+    if (!acc) {
+      signerAddr = null;
+      el('walletBadge').className = 'badge disconnected';
+      el('walletBadge').innerHTML = '<span class="dot"></span>Disconnected';
+      el('connectBtn').textContent = 'Connect Wallet';
+    } else {
+      signer = await provider.getSigner();
+      signerAddr = acc;
+      el('walletBadge').innerHTML = `<span class="dot"></span>${short(acc)}`;
+      if (factoryAddr) { wireContracts(); loadAll(); }
+    }
+  });
+  window.ethereum.on('chainChanged', () => location.reload());
+}
+</script>
+</body>
+</html>

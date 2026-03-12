@@ -1,0 +1,758 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OneMEME — Salt Miner</title>
+  <script src="https://cdn.jsdelivr.net/npm/ethers@6.13.4/dist/ethers.umd.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:      #0d0d0f;
+      --surface: #141417;
+      --surface2:#1a1a1e;
+      --border:  #242428;
+      --accent:  #f0b90b;
+      --accent2: #e8a800;
+      --danger:  #e05252;
+      --ok:      #42b883;
+      --warn:    #f0a30b;
+      --text:    #e8e8ed;
+      --muted:   #7a7a8a;
+      --radius:  10px;
+    }
+
+    body {
+      font-family: 'Inter', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    .shell { max-width: 900px; margin: 0 auto; padding: 0 16px 60px; }
+
+    /* Header */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 20px 0 18px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 28px;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+    .logo { font-size: 18px; font-weight: 700; letter-spacing: -.3px; }
+    .logo span { color: var(--accent); }
+    .header-links a {
+      color: var(--muted);
+      font-size: 13px;
+      text-decoration: none;
+      margin-left: 20px;
+    }
+    .header-links a:hover { color: var(--accent); }
+
+    /* Section labels */
+    .section-title {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .8px;
+      color: var(--muted);
+      margin: 24px 0 12px;
+    }
+
+    /* Cards */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      margin-bottom: 14px;
+    }
+
+    /* Form fields */
+    .field { margin-bottom: 12px; }
+    .field label {
+      display: block;
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: .4px;
+      margin-bottom: 5px;
+    }
+    .field-row { display: flex; gap: 8px; align-items: flex-end; }
+    .field-row .field { flex: 1; margin-bottom: 0; }
+
+    input[type=text], input[type=number], select {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      color: var(--text);
+      padding: 8px 11px;
+      font-size: 13px;
+      font-family: monospace;
+      outline: none;
+      transition: border-color .15s;
+    }
+    input:focus, select:focus { border-color: var(--accent); }
+    input::placeholder { color: var(--muted); }
+    select option { background: var(--bg); }
+    input.error { border-color: var(--danger); }
+
+    /* Buttons */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      background: var(--accent);
+      color: #0d0d0f;
+      border: none;
+      border-radius: var(--radius);
+      padding: 9px 18px;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background .15s;
+    }
+    .btn:hover { background: var(--accent2); }
+    .btn:disabled { opacity: .4; cursor: not-allowed; }
+    .btn.secondary {
+      background: var(--surface2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      font-weight: 600;
+    }
+    .btn.secondary:hover { border-color: var(--accent); color: var(--accent); }
+    .btn.danger { background: var(--danger); color: #fff; }
+    .btn.danger:hover { background: #c94444; }
+    .btn.ok { background: var(--ok); color: #0d0d0f; }
+    .btn.ok:hover { background: #37a070; }
+    .btn.small { padding: 6px 12px; font-size: 12px; }
+
+    /* Two-column config grid */
+    .config-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    @media (max-width: 600px) { .config-grid { grid-template-columns: 1fr; } }
+
+    /* Mining panel */
+    .mining-panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+    .mining-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border);
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    .mining-top h2 { font-size: 15px; font-weight: 600; }
+
+    /* Stats bar */
+    .stats-bar {
+      display: flex;
+      gap: 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .stat {
+      flex: 1;
+      padding: 14px 18px;
+      border-right: 1px solid var(--border);
+    }
+    .stat:last-child { border-right: none; }
+    .stat .stat-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; margin-bottom: 4px; }
+    .stat .stat-value { font-size: 20px; font-weight: 700; font-family: monospace; }
+    .stat .stat-value.accent { color: var(--accent); }
+    .stat .stat-value.ok     { color: var(--ok);    }
+    .stat .stat-value.muted  { color: var(--muted); }
+
+    /* Progress bar */
+    .progress-wrap { padding: 10px 20px; border-bottom: 1px solid var(--border); }
+    .progress-bar {
+      height: 4px;
+      background: var(--border);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%;
+      background: var(--accent);
+      border-radius: 2px;
+      width: 0%;
+      transition: width .3s;
+    }
+    .progress-label {
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 5px;
+      display: flex;
+      justify-content: space-between;
+    }
+
+    /* Status indicator */
+    .status-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--muted);
+      display: inline-block;
+    }
+    .status-dot.mining { background: var(--accent); animation: pulse 1s infinite; }
+    .status-dot.found  { background: var(--ok); }
+    .status-dot.idle   { background: var(--muted); }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .4; } }
+
+    /* Results list */
+    .results-area { padding: 0; }
+    .result-empty {
+      padding: 36px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .result-item {
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border);
+    }
+    .result-item:last-child { border-bottom: none; }
+    .result-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .result-badge {
+      font-size: 11px;
+      font-weight: 700;
+      padding: 3px 10px;
+      border-radius: 20px;
+      background: #42b88322;
+      color: var(--ok);
+      border: 1px solid #42b88344;
+    }
+    .result-grid {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 5px 12px;
+      align-items: center;
+    }
+    .result-key {
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: .4px;
+      white-space: nowrap;
+    }
+    .result-val {
+      font-family: monospace;
+      font-size: 12px;
+      word-break: break-all;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .result-val .addr-end { color: var(--accent); font-weight: 700; }
+    .copy-btn {
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      border-radius: 5px;
+      padding: 2px 8px;
+      font-size: 11px;
+      cursor: pointer;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .copy-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* Help box */
+    .help-box {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px 16px;
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.7;
+    }
+    .help-box code {
+      background: #ffffff10;
+      padding: 1px 5px;
+      border-radius: 4px;
+      font-family: monospace;
+      color: var(--text);
+    }
+    .help-box strong { color: var(--text); }
+
+    /* Toast */
+    #toast {
+      position: fixed; bottom: 20px; right: 20px;
+      background: var(--surface); border: 1px solid var(--ok);
+      border-radius: var(--radius); padding: 10px 16px;
+      font-size: 13px; color: var(--ok);
+      z-index: 999; display: none;
+      max-width: 320px;
+    }
+
+    /* Vanity preview */
+    .vanity-preview {
+      font-family: monospace;
+      font-size: 13px;
+      margin-top: 6px;
+      color: var(--muted);
+    }
+    .vanity-preview .match { color: var(--accent); font-weight: 700; }
+  </style>
+</head>
+<body>
+<div class="shell">
+
+  <header>
+    <div class="logo">One<span>MEME</span> <span style="color:var(--muted);font-weight:400;font-size:14px">/ Salt Miner</span></div>
+    <div class="header-links">
+      <a href="../factorymanagement/">Factory Manager</a>
+    </div>
+  </header>
+
+  <!-- How it works -->
+  <div class="help-box" style="margin-bottom:20px">
+    <strong>How it works.</strong>
+    Token clones are deployed with CREATE2. The on-chain salt is
+    <code>keccak256(abi.encode(creator, userSalt))</code>.
+    Mine a <code>userSalt</code> such that the resulting token address ends in
+    <code>0x…<strong style="color:var(--accent)">????</strong></code> (your chosen suffix).
+    Pass the found salt in <code>BaseParams.salt</code> when calling
+    <code>createToken / createTT / createRFL</code>.
+    Expected attempts for a 4-hex-digit suffix: <strong>~65 536</strong>.
+  </div>
+
+  <!-- Configuration -->
+  <div class="section-title">Configuration</div>
+  <div class="card">
+    <div class="config-grid">
+      <div class="field">
+        <label>Factory Address</label>
+        <input id="cfgFactory" type="text" placeholder="0x…" spellcheck="false" />
+      </div>
+      <div class="field">
+        <label>Creator Address (msg.sender)</label>
+        <input id="cfgCreator" type="text" placeholder="0x… (your wallet)" spellcheck="false" />
+      </div>
+    </div>
+
+    <div class="field" style="margin-top:4px">
+      <label>Implementation Address</label>
+      <div class="field-row">
+        <div class="field">
+          <input id="cfgImpl" type="text" placeholder="0x… (standardImpl / taxImpl / reflectionImpl)" spellcheck="false" />
+        </div>
+        <button class="btn secondary small" onclick="fetchImpls()" style="margin-bottom:0">Fetch from factory</button>
+      </div>
+      <div id="implPicker" style="display:none;margin-top:8px;display:none">
+        <select id="implSelect" onchange="selectImpl()">
+          <option value="">— select type —</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="config-grid" style="margin-top:4px">
+      <div class="field">
+        <label>Vanity Suffix (hex, 1–8 chars)</label>
+        <input id="cfgSuffix" type="text" value="1111" maxlength="8" spellcheck="false"
+               oninput="updateSuffixPreview()" />
+        <div class="vanity-preview" id="suffixPreview">Address will end in: 0x…<span class="match">1111</span></div>
+      </div>
+      <div class="field">
+        <label>Start Nonce (optional, resume)</label>
+        <input id="cfgNonce" type="text" value="0" placeholder="0" spellcheck="false" />
+      </div>
+    </div>
+
+    <div style="display:flex;align-items:center;gap:10px;margin-top:6px">
+      <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:13px">
+        <input type="checkbox" id="cfgContinue" style="width:auto;accent-color:var(--accent)" />
+        Continue mining after first result
+      </label>
+    </div>
+  </div>
+
+  <!-- Mining Panel -->
+  <div class="section-title">Mining</div>
+  <div class="mining-panel">
+    <div class="mining-top">
+      <div style="display:flex;align-items:center;gap:10px">
+        <span class="status-dot idle" id="statusDot"></span>
+        <h2 id="statusLabel">Idle</h2>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn" id="startBtn" onclick="startMining()">▶ Start Mining</button>
+        <button class="btn danger" id="stopBtn" onclick="stopMining()" disabled>■ Stop</button>
+      </div>
+    </div>
+
+    <div class="stats-bar">
+      <div class="stat">
+        <div class="stat-label">Attempts</div>
+        <div class="stat-value muted" id="statAttempts">0</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Speed</div>
+        <div class="stat-value accent" id="statSpeed">— /s</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Elapsed</div>
+        <div class="stat-value muted" id="statElapsed">0s</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Found</div>
+        <div class="stat-value ok" id="statFound">0</div>
+      </div>
+    </div>
+
+    <div class="progress-wrap">
+      <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+      <div class="progress-label">
+        <span id="progressText">Expected ~65 536 attempts for a 4-char suffix</span>
+        <span id="progressPct"></span>
+      </div>
+    </div>
+
+    <div class="results-area" id="resultsArea">
+      <div class="result-empty" id="resultEmpty">Results will appear here once a matching address is found.</div>
+    </div>
+  </div>
+
+</div><!-- /shell -->
+
+<div id="toast"></div>
+
+<script>
+// ── State ────────────────────────────────────────────────────────────────────
+let mining    = false;
+let rafHandle = null;
+let nonce     = 0n;
+let startTime = 0;
+let totalAttempts = 0n;
+let foundCount = 0;
+let lastRateCheck = { time: 0, count: 0n };
+let currentRate = 0;
+let results = [];
+
+// Precomputed per-run
+let factory       = '';
+let creator       = '';
+let impl          = '';
+let suffix        = '';
+let initcodeHash  = '';
+let continueAfter = false;
+
+const CHUNK_SIZE = 800; // iterations per animation frame
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+const el  = id => document.getElementById(id);
+const get = id => el(id).value.trim();
+
+function toast(msg, ms = 2000) {
+  const t = el('toast');
+  t.textContent = msg;
+  t.style.display = 'block';
+  clearTimeout(t._to);
+  t._to = setTimeout(() => t.style.display = 'none', ms);
+}
+
+function fmtNum(n) {
+  if (typeof n === 'bigint') n = Number(n);
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return n.toString();
+}
+
+function fmtTime(ms) {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return s + 's';
+  return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+}
+
+function highlightSuffix(addr, sfx) {
+  const lower = addr.toLowerCase();
+  const end   = lower.slice(-sfx.length);
+  const rest  = lower.slice(0, -sfx.length);
+  return `<span>${rest}</span><span class="addr-end">${end}</span>`;
+}
+
+// ── Suffix preview ────────────────────────────────────────────────────────────
+function updateSuffixPreview() {
+  const sfx = get('cfgSuffix').replace(/[^0-9a-fA-F]/g, '').toLowerCase();
+  el('cfgSuffix').value = sfx;
+  if (sfx.length === 0) {
+    el('suffixPreview').innerHTML = 'Enter a hex suffix (e.g. <code>1111</code>)';
+    return;
+  }
+  const expected = Math.round(Math.pow(16, sfx.length));
+  el('suffixPreview').innerHTML =
+    `Address will end in: <span style="color:var(--muted)">0x…</span><span class="match">${sfx}</span>` +
+    `  <span style="color:var(--muted);font-size:11px">~${fmtNum(expected)} attempts expected</span>`;
+}
+
+// ── Initcode hash ─────────────────────────────────────────────────────────────
+function computeInitcodeHash(implAddr) {
+  // EIP-1167 initcode: 10-byte deploy prefix + 20-byte impl + 15-byte suffix
+  const implHex = implAddr.slice(2).padStart(40, '0').toLowerCase();
+  const bytecode =
+    '0x3d602d80600a3d3981f3363d3d373d3d3d363d73' +
+    implHex +
+    '5af43d82803e903d91602b57fd5bf3';
+  return ethers.keccak256(bytecode);
+}
+
+// ── Predict one address ───────────────────────────────────────────────────────
+function predict(nonceVal) {
+  const userSalt    = ethers.zeroPadValue(ethers.toBeHex(nonceVal), 32);
+  const derivedSalt = ethers.keccak256(
+    ethers.AbiCoder.defaultAbiCoder().encode(['address', 'bytes32'], [creator, userSalt])
+  );
+  const addr = ethers.getCreate2Address(factory, derivedSalt, initcodeHash);
+  return { addr: addr.toLowerCase(), userSalt, derivedSalt };
+}
+
+// ── Fetch impls from factory ──────────────────────────────────────────────────
+async function fetchImpls() {
+  const f = get('cfgFactory');
+  if (!ethers.isAddress(f)) { alert('Enter a valid factory address first.'); return; }
+  try {
+    const rpc = new ethers.JsonRpcProvider('https://bsc-dataseed.binance.org');
+    const mini = new ethers.Contract(f, [
+      'function standardImpl() view returns (address)',
+      'function taxImpl() view returns (address)',
+      'function reflectionImpl() view returns (address)',
+    ], rpc);
+    const [s, t, r] = await Promise.all([mini.standardImpl(), mini.taxImpl(), mini.reflectionImpl()]);
+    const sel = el('implSelect');
+    sel.innerHTML = `
+      <option value="">— select type —</option>
+      <option value="${s}">StandardToken — ${s.slice(0,10)}…</option>
+      <option value="${t}">TaxToken      — ${t.slice(0,10)}…</option>
+      <option value="${r}">ReflectionToken — ${r.slice(0,10)}…</option>
+    `;
+    el('implPicker').style.display = 'block';
+    toast('Implementations fetched.');
+  } catch(e) { alert('Fetch failed: ' + e.message); }
+}
+
+function selectImpl() {
+  const v = el('implSelect').value;
+  if (v) el('cfgImpl').value = v;
+}
+
+// ── Validation ────────────────────────────────────────────────────────────────
+function validate() {
+  let ok = true;
+
+  const fields = [
+    { id: 'cfgFactory', check: v => ethers.isAddress(v), msg: 'Invalid factory address' },
+    { id: 'cfgCreator', check: v => ethers.isAddress(v), msg: 'Invalid creator address' },
+    { id: 'cfgImpl',    check: v => ethers.isAddress(v), msg: 'Invalid implementation address' },
+    { id: 'cfgSuffix',  check: v => /^[0-9a-fA-F]{1,8}$/.test(v), msg: 'Suffix must be 1–8 hex chars' },
+  ];
+
+  fields.forEach(f => {
+    const input = el(f.id);
+    if (!f.check(get(f.id))) {
+      input.classList.add('error');
+      ok = false;
+    } else {
+      input.classList.remove('error');
+    }
+  });
+
+  if (!ok) return false;
+
+  // Warn if suffix is very long (high search space)
+  const sfx = get('cfgSuffix').toLowerCase();
+  if (sfx.length > 6) {
+    const expected = Math.round(Math.pow(16, sfx.length));
+    const confirmed = window.confirm(
+      `A ${sfx.length}-char suffix requires ~${fmtNum(expected)} attempts on average.\n` +
+      `This could take a very long time. Continue?`
+    );
+    if (!confirmed) return false;
+  }
+
+  return true;
+}
+
+// ── Mining loop ───────────────────────────────────────────────────────────────
+function startMining() {
+  if (mining) return;
+  if (!validate()) return;
+
+  factory       = get('cfgFactory');
+  creator       = get('cfgCreator');
+  impl          = get('cfgImpl');
+  suffix        = get('cfgSuffix').toLowerCase();
+  continueAfter = el('cfgContinue').checked;
+
+  const startNonce = get('cfgNonce').trim();
+  nonce = startNonce ? BigInt(startNonce) : 0n;
+
+  try { initcodeHash = computeInitcodeHash(impl); }
+  catch(e) { alert('Failed to compute initcode hash: ' + e.message); return; }
+
+  mining        = true;
+  startTime     = performance.now();
+  totalAttempts = 0n;
+  lastRateCheck = { time: startTime, count: 0n };
+  currentRate   = 0;
+
+  setStatus('mining');
+  el('startBtn').disabled = true;
+  el('stopBtn').disabled  = false;
+
+  rafHandle = requestAnimationFrame(mineChunk);
+}
+
+function stopMining() {
+  mining = false;
+  if (rafHandle) { cancelAnimationFrame(rafHandle); rafHandle = null; }
+  setStatus(foundCount > 0 ? 'found' : 'idle');
+  el('startBtn').disabled = false;
+  el('stopBtn').disabled  = true;
+  if (nonce > 0n) el('cfgNonce').value = nonce.toString();
+}
+
+function mineChunk() {
+  if (!mining) return;
+
+  for (let i = 0; i < CHUNK_SIZE; i++) {
+    const { addr, userSalt, derivedSalt } = predict(nonce);
+
+    if (addr.endsWith(suffix)) {
+      addResult({ addr, userSalt, derivedSalt, nonce: nonce.toString() });
+      if (!continueAfter) { stopMining(); return; }
+    }
+
+    nonce++;
+    totalAttempts++;
+  }
+
+  updateStats();
+  rafHandle = requestAnimationFrame(mineChunk);
+}
+
+// ── Stats ─────────────────────────────────────────────────────────────────────
+function updateStats() {
+  const now = performance.now();
+  const dt  = (now - lastRateCheck.time) / 1000;
+  if (dt >= 0.5) {
+    const delta = totalAttempts - lastRateCheck.count;
+    currentRate = Math.round(Number(delta) / dt);
+    lastRateCheck = { time: now, count: totalAttempts };
+  }
+
+  const expected = Math.pow(16, suffix.length);
+  const pct = Math.min(99.9, (Number(totalAttempts) / expected) * 100);
+
+  el('statAttempts').textContent = fmtNum(totalAttempts);
+  el('statSpeed').textContent    = fmtNum(currentRate) + '/s';
+  el('statElapsed').textContent  = fmtTime(performance.now() - startTime);
+  el('statFound').textContent    = foundCount.toString();
+  el('progressFill').style.width = pct.toFixed(1) + '%';
+  el('progressPct').textContent  = pct.toFixed(1) + '%';
+  el('progressText').textContent = `~${fmtNum(Math.round(expected))} expected for ${suffix.length}-char suffix`;
+}
+
+function setStatus(s) {
+  const dot   = el('statusDot');
+  const label = el('statusLabel');
+  dot.className = 'status-dot ' + s;
+  if (s === 'mining') { label.textContent = 'Mining…'; }
+  else if (s === 'found') { label.textContent = 'Done — address found'; }
+  else { label.textContent = 'Idle'; }
+}
+
+// ── Results ───────────────────────────────────────────────────────────────────
+function addResult({ addr, userSalt, derivedSalt, nonce: n }) {
+  foundCount++;
+  results.push({ addr, userSalt, derivedSalt, nonce: n });
+
+  el('resultEmpty').style.display = 'none';
+  el('statFound').textContent = foundCount.toString();
+
+  const item = document.createElement('div');
+  item.className = 'result-item';
+  item.innerHTML = `
+    <div class="result-header">
+      <span class="result-badge">✓ Match #${foundCount}</span>
+      <span style="color:var(--muted);font-size:12px">Nonce: ${n}</span>
+    </div>
+    <div class="result-grid">
+      <span class="result-key">Token Address</span>
+      <span class="result-val">
+        <span>${highlightSuffix(addr, suffix)}</span>
+        <button class="copy-btn" onclick="copy('${addr}', this)">Copy</button>
+      </span>
+
+      <span class="result-key">User Salt (bytes32)</span>
+      <span class="result-val">
+        <span style="font-size:11px">${userSalt}</span>
+        <button class="copy-btn" onclick="copy('${userSalt}', this)">Copy</button>
+      </span>
+
+      <span class="result-key">Derived Salt (keccak)</span>
+      <span class="result-val">
+        <span style="font-size:11px;color:var(--muted)">${derivedSalt}</span>
+        <button class="copy-btn" onclick="copy('${derivedSalt}', this)">Copy</button>
+      </span>
+    </div>
+    <div style="margin-top:12px;padding:10px 12px;background:var(--surface2);border-radius:7px;font-size:12px;color:var(--muted)">
+      Pass <code style="background:#ffffff10;padding:1px 5px;border-radius:4px;color:var(--text)">salt: "${userSalt}"</code>
+      in <strong style="color:var(--text)">BaseParams</strong> when calling
+      <code style="background:#ffffff10;padding:1px 5px;border-radius:4px;color:var(--text)">createToken / createTT / createRFL</code>.
+    </div>
+  `;
+  el('resultsArea').appendChild(item);
+
+  // Scroll into view
+  item.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function copy(text, btn) {
+  navigator.clipboard.writeText(text).then(() => {
+    const orig = btn.textContent;
+    btn.textContent = '✓ Copied';
+    setTimeout(() => btn.textContent = orig, 1500);
+  });
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+updateSuffixPreview();
+
+// Auto-fill creator from MetaMask if available
+if (window.ethereum) {
+  window.ethereum.request({ method: 'eth_accounts' }).then(accounts => {
+    if (accounts.length && !get('cfgCreator')) {
+      el('cfgCreator').value = accounts[0];
+    }
+  }).catch(() => {});
+
+  window.ethereum.on('accountsChanged', ([acc]) => {
+    if (acc && !get('cfgCreator')) el('cfgCreator').value = acc;
+  });
+}
+</script>
+</body>
+</html>
