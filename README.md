@@ -173,10 +173,10 @@ Expected iterations: ~65 536 (2^16). Completes in under a second in JS.
 Plain ERC-20. No taxes, no reflection. `enableTrading` is a no-op (interface compatibility only).
 
 ### `TaxToken`
-Configurable buy/sell taxes distributed to up to 5 wallets/purposes (marketing, team, treasury, burn, liquidity). Taxes are accumulated and swapped to BNB post-migration. Max 25 % total per side.
+Configurable buy/sell taxes distributed to up to 5 wallets/purposes (marketing, team, treasury, burn, liquidity). Taxes are accumulated and swapped to BNB post-migration. Max 10 % total per side.
 
 ### `ReflectionToken`
-RFI-style passive reflection distributed to all non-excluded holders on every transfer. Supports marketing, team, LP, burn, and reflection allocations. Max 25 % total per side.
+RFI-style passive reflection distributed to all non-excluded holders on every transfer. Supports marketing, team, LP, burn, and reflection allocations. Max 10 % total per side.
 
 ---
 
@@ -246,7 +246,7 @@ After deploying, call `updateTWAP()` once to seed the oracle before the first to
 | TWAP observation period | 30 minutes |
 | TWAP max age | 1 440 blocks default (~2 h on BSC), configurable |
 | Vesting duration | 365 days linear |
-| Max buy/sell tax | 25 % (2 500 BPS) per side |
+| Max buy/sell tax | 10 % (1 000 BPS) per side |
 | Antibot range | 10–199 blocks |
 | LP lock destination | `0x000…dEaD` (permanent) |
 | Vanity address suffix | `0x1111` (last 4 hex digits) |

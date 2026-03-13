@@ -88,7 +88,7 @@ contract ReflectionToken is ILaunchpadToken {
     uint256 public sellBurnTax;
     uint256 public sellReflectionTax;
 
-    uint256 public constant MAX_TOTAL_TAX = 2500; // 25 %
+    uint256 public constant MAX_TOTAL_TAX = 1000; // 10 %
 
     uint256 public swapThreshold;
 
