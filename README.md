@@ -192,7 +192,11 @@ The on-chain CREATE2 salt is `keccak256(abi.encode(msg.sender, userSalt))`, bind
 **Off-chain salt mining (JavaScript):**
 
 ```js
-const impl = await factory.standardImpl(); // or taxImpl / reflectionImpl
+// Choose the implementation address that matches the token type you want to create:
+//   factory.standardImpl()    → createToken()
+//   factory.taxImpl()         → createTT()
+//   factory.reflectionImpl()  → createRFL()
+const impl = await factory.standardImpl();
 
 let userSalt;
 for (let n = 0n; ; n++) {
@@ -201,11 +205,35 @@ for (let n = 0n; ; n++) {
   if (addr.toLowerCase().endsWith("1111")) break;
 }
 
-// Pass in BaseParams
-await factory.createToken({ ..., salt: userSalt }, { value: creationFee });
+// StandardToken — salt lives directly in BaseParams
+await factory.createToken(
+  { name, symbol, supplyOption, enableCreatorAlloc, enableAntibot, antibotBlocks,
+    customVirtualBNB, customMigrationTarget, metaURI, salt: userSalt },
+  { value: creationFee }
+);
+
+// TaxToken — salt is nested inside base
+await factory.createTT(
+  { base: { name, symbol, supplyOption, enableCreatorAlloc, enableAntibot, antibotBlocks,
+             customVirtualBNB, customMigrationTarget, metaURI, salt: userSalt },
+    wallets: [marketingAddr, teamAddr, treasuryAddr],
+    buyTaxes:  [mktBps, teamBps, trsyBps, burnBps, lpBps],
+    sellTaxes: [mktBps, teamBps, trsyBps, burnBps, lpBps],
+    swapThreshold },
+  { value: creationFee }
+);
+
+// ReflectionToken — salt is nested inside base; taxes are set post-deployment
+await factory.createRFL(
+  { base: { name, symbol, supplyOption, enableCreatorAlloc, enableAntibot, antibotBlocks,
+             customVirtualBNB, customMigrationTarget, metaURI, salt: userSalt },
+    wallets: [marketingAddr, teamAddr],
+    swapThreshold },
+  { value: creationFee }
+);
 ```
 
-Expected iterations: ~65 536 (2^16). Completes in under a second in JS.
+`creationFee` defaults to `DEFAULT_CREATION_FEE` (`0.0011 ether`); read it at call time via `factory.creationFee()`. Expected mining iterations: ~65 536 (2^16). Completes in under a second in JS.
 
 ---
 
@@ -266,9 +294,10 @@ constructor(
 | `setCharityWallet(addr)` | Set charity wallet; `address(0)` disables the split (all fees go to `feeRecipient`) |
 | `addManager(addr)` | Grant manager role (may update creation fee and default params) |
 | `removeManager(addr)` | Revoke manager role |
+| `managers(addr)` | View — returns `true` if address holds manager role |
 | `transferOwnership(addr)` | Propose ownership transfer (two-step; candidate calls `acceptOwnership()`) |
-| `acceptOwnership()` | Pending owner accepts the proposed transfer |
-| `rescueBNB()` | Sweep stray BNB (not part of any active pool) to `feeRecipient` |
+| `acceptOwnership()` | Pending owner confirms the proposed transfer |
+| `rescueBNB()` | Sweep stray BNB (not accounted for by any active pool) to `feeRecipient` |
 
 ---
 
