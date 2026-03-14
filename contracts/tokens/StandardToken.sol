@@ -12,6 +12,17 @@ import "../interfaces/ILaunchpadToken.sol";
  */
 contract StandardToken is ILaunchpadToken {
 
+    error NotOwner();
+    error NotFactory();
+    error AlreadyInitialized();
+    error ZeroAddress();
+    error ZeroAmount();
+    error VestingAlreadySet();
+    error NoVesting();
+    error NothingToClaim();
+    error InsufficientBalance();
+    error ExceedsAllowance();
+
     bool    private _initialized;
     address private _owner;
     address public  factory;
@@ -40,15 +51,11 @@ contract StandardToken is ILaunchpadToken {
     event VestingSetup(address indexed creator, uint256 amount);
     event VestingClaimed(address indexed owner, uint256 amount);
 
-    modifier onlyFactory() {
-        require(msg.sender == factory, "Not factory");
-        _;
-    }
+    modifier onlyFactory() { if (msg.sender != factory) revert NotFactory(); _; }
+    modifier onlyOwner()   { if (msg.sender != _owner)  revert NotOwner();   _; }
 
-    modifier onlyOwner() {
-        require(msg.sender == _owner, "Not owner");
-        _;
-    }
+    /// @dev Prevents direct initialization of the implementation contract.
+    constructor() { _initialized = true; }
 
     // ─────────────────────────────────────────────────────────────────────
     // INIT
@@ -69,9 +76,9 @@ contract StandardToken is ILaunchpadToken {
         address          tokenOwner_,
         string  calldata metaURI_
     ) external {
-        require(!_initialized,          "Already initialized");
-        require(factory_    != address(0), "Zero factory");
-        require(tokenOwner_ != address(0), "Zero owner");
+        if (_initialized)              revert AlreadyInitialized();
+        if (factory_    == address(0)) revert ZeroAddress();
+        if (tokenOwner_ == address(0)) revert ZeroAddress();
         _initialized = true;
 
         factory      = factory_;
@@ -85,12 +92,6 @@ contract StandardToken is ILaunchpadToken {
         emit Transfer(address(0), factory_, totalSupply_);
         emit OwnershipTransferred(address(0), tokenOwner_);
     }
-
-    /**
-     * @notice No-op for StandardToken — there is no pair-based fee logic to
-     *         unlock.  Exists only to satisfy the ILaunchpadToken interface.
-     */
-    function enableTrading(address, address) external override onlyFactory {}
 
     // ─────────────────────────────────────────────────────────────────────
     // METADATA URI
@@ -110,9 +111,9 @@ contract StandardToken is ILaunchpadToken {
      *         allocation to this contract.  Starts the 12-month linear vest.
      */
     function setupVesting(address creator_, uint256 amount_) external override onlyFactory {
-        require(vestingCreator == address(0), "Vesting already set");
-        require(creator_ != address(0),       "Zero creator");
-        require(amount_  > 0,                 "Zero amount");
+        if (vestingCreator != address(0)) revert VestingAlreadySet();
+        if (creator_ == address(0))       revert ZeroAddress();
+        if (amount_  == 0)                revert ZeroAmount();
         vestingCreator = creator_;
         vestingTotal   = amount_;
         vestingStart   = block.timestamp;
@@ -126,12 +127,12 @@ contract StandardToken is ILaunchpadToken {
      *         vestingCreator records the original recipient for transparency only.
      */
     function claimVesting() external {
-        require(msg.sender == _owner, "Not owner");
-        require(vestingTotal > 0,     "No vesting");
+        if (msg.sender != _owner) revert NotOwner();
+        if (vestingTotal == 0)    revert NoVesting();
         uint256 elapsed = block.timestamp - vestingStart;
         if (elapsed > VESTING_DURATION) elapsed = VESTING_DURATION;
         uint256 claimable = (vestingTotal * elapsed / VESTING_DURATION) - vestingClaimed;
-        require(claimable > 0, "Nothing to claim");
+        if (claimable == 0) revert NothingToClaim();
         vestingClaimed += claimable;
         _transfer(address(this), _owner, claimable);
         emit VestingClaimed(_owner, claimable);
@@ -152,7 +153,7 @@ contract StandardToken is ILaunchpadToken {
     function owner() external view returns (address) { return _owner; }
 
     function transferOwnership(address newOwner) external onlyOwner {
-        require(newOwner != address(0), "Zero address");
+        if (newOwner == address(0)) revert ZeroAddress();
         emit OwnershipTransferred(_owner, newOwner);
         _owner = newOwner;
     }
@@ -191,7 +192,7 @@ contract StandardToken is ILaunchpadToken {
 
     function transferFrom(address from, address to, uint256 amount) external override returns (bool) {
         uint256 allowed = _allowances[from][msg.sender];
-        require(allowed >= amount, "Exceeds allowance");
+        if (allowed < amount) revert ExceedsAllowance();
         unchecked { _allowances[from][msg.sender] = allowed - amount; }
         _transfer(from, to, amount);
         return true;
@@ -202,8 +203,8 @@ contract StandardToken is ILaunchpadToken {
     // ─────────────────────────────────────────────────────────────────────
 
     function _transfer(address from, address to, uint256 amount) private {
-        require(from != address(0) && to != address(0), "Zero address");
-        require(_balances[from] >= amount, "Insufficient balance");
+        if (from == address(0) || to == address(0)) revert ZeroAddress();
+        if (_balances[from] < amount) revert InsufficientBalance();
         unchecked {
             _balances[from] -= amount;
             _balances[to]   += amount;
@@ -212,7 +213,7 @@ contract StandardToken is ILaunchpadToken {
     }
 
     function _approve(address owner_, address spender, uint256 amount) private {
-        require(owner_ != address(0) && spender != address(0), "Zero address");
+        if (owner_ == address(0) || spender == address(0)) revert ZeroAddress();
         _allowances[owner_][spender] = amount;
         emit Approval(owner_, spender, amount);
     }

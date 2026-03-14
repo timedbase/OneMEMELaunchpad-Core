@@ -6,8 +6,6 @@ import "./tokens/StandardToken.sol";
 import "./tokens/TaxToken.sol";
 import "./tokens/ReflectionToken.sol";
 
-// ─── External interfaces ──────────────────────────────────────────────────────
-
 interface IPancakeRouter02 {
     function factory() external pure returns (address);
     function WETH()    external pure returns (address);
@@ -21,17 +19,9 @@ interface IPancakeRouter02 {
     ) external payable returns (uint amountToken, uint amountETH, uint liquidity);
 }
 
-interface IPancakeFactory {
-    function getPair(address tokenA, address tokenB) external view returns (address pair);
-}
-
-/// @dev Minimal PancakeSwap V2 pair surface needed for TWAP oracle.
-interface IPancakeV2Pair {
-    function token0()               external view returns (address);
-    function token1()               external view returns (address);
-    function getReserves()          external view returns (uint112 r0, uint112 r1, uint32 ts);
-    function price0CumulativeLast() external view returns (uint256);
-    function price1CumulativeLast() external view returns (uint256);
+/// @dev Implemented by TaxToken and ReflectionToken — exits bonding phase after liquidity is seeded.
+interface IPostMigrate {
+    function postMigrateSetup() external;
 }
 
 /**
@@ -39,11 +29,18 @@ interface IPancakeV2Pair {
  * @notice Creates and manages meme-token launches via a virtual-liquidity
  *         bonding curve, migrates to PancakeSwap, and handles creator vesting.
  *
- * ─── Price oracle ─────────────────────────────────────────────────────────
- *   Uses the PancakeSwap V2 USDC/WBNB pair as a TWAP oracle (30-min period).
- *   Staleness is measured in blocks (configurable, default 1 440 ≈ 2 h on BSC).
- *   All USD-denominated parameters ($1 creation fee, $2 000 virtual mcap,
- *   $11 000 migration target) are converted to BNB at oracle time.
+ * ─── Fees & parameters ────────────────────────────────────────────────────
+ *   creationFee          Fixed creation fee in BNB wei.
+ *   platformFee          BPS portion of each trade fee sent to feeRecipient.
+ *   charityFee           BPS portion of each trade fee sent to charityWallet.
+ *   Total trade fee      = platformFee + charityFee  (max 250 BPS = 2.5 %).
+ *   defaultVirtualBNB    Virtual BNB seeded into the bonding curve at launch.
+ *   defaultMigrationTarget  BNB that must be raised before DEX migration.
+ *
+ *   All values are stored and used in BNB wei.  They are locked into
+ *   TokenConfig at creation time.  Subsequent owner/manager updates only
+ *   affect future launches.  Creators may override virtualBNB and
+ *   migrationTarget per-token via BaseParams.
  *
  * ─── Supply options (18 decimals) ─────────────────────────────────────────
  *   ONE      =           1 × 10^18
@@ -52,38 +49,38 @@ interface IPancakeV2Pair {
  *   BILLION  = 1,000,000,000 × 10^18
  *
  * ─── Token distribution ───────────────────────────────────────────────────
- *   38 %  liquidity allocation  (added to DEX at migration, LP locked)
- *    5 %  creator allocation    (optional, vested 12 months linearly)
- *   57 %  bonding-curve supply  (if creator enabled)
- *   62 %  bonding-curve supply  (if no creator allocation)
+ *   38 %  liquidity  (added to DEX at migration, LP permanently locked)
+ *    5 %  creator    (optional, 12-month linear vest inside token contract)
+ *   57 %  bonding curve  (if creator allocation enabled)
+ *   62 %  bonding curve  (if no creator allocation)
  *
  * ─── Bonding curve ────────────────────────────────────────────────────────
  *   Constant-product AMM with virtual BNB liquidity:
- *     k          = virtualBNB × bcTokensTotal   (set once at launch)
+ *     k          = virtualBNB × bcTokensTotal   (invariant, set at launch)
  *     poolBNB    = virtualBNB + raisedBNB
  *     poolTokens = bcTokensTotal − bcTokensSold
  *
  *   The crossing buy that reaches migrationTarget sells ALL remaining BC
- *   tokens and refunds any excess BNB to the buyer, guaranteeing the curve
- *   is fully exhausted at exactly the migration threshold.
+ *   tokens and refunds any excess BNB, guaranteeing full curve exhaustion.
  *
  * ─── Decaying antibot ─────────────────────────────────────────────────────
  *   penaltyBPS = 10000 × (tradingBlock − block.number)
  *                       ÷ (tradingBlock − creationBlock)
  *   tokensToDeadWallet = tokensOut × penaltyBPS / 10000
- *   Applies to ALL buyers — including the creator — for any buy() call made
- *   within the antibot window.  The only exempt buy is the atomic early buy
- *   embedded in createToken / createTT / createRFL (skipAntibot = true).
+ *   Applies to ALL buyers within the antibot window.  The only exempt buy
+ *   is the atomic early buy embedded in createToken/createTT/createRFL
+ *   (skipAntibot = true).
  *
  * ─── Creator vesting ──────────────────────────────────────────────────────
- *   Linear over 12 months from token-creation timestamp.
- *   The token contract itself acts as the vesting escrow.
- *   Claimable by the current token owner (transferable with ownership).
+ *   Linear over 12 months from launch timestamp.
+ *   The token contract acts as its own vesting escrow.
+ *   Claimable by the current token owner; transferable via ownership transfer.
+ *   Tracked separately from accumulated taxes to prevent accidental swap.
  *
  * ─── Vanity addresses ─────────────────────────────────────────────────────
- *   Every token clone is deployed via CREATE2 with a user-provided salt,
- *   and the resulting address must end in 0x1111 (last 4 hex digits).
- *   Off-chain tool: mine `salt` such that predictTokenAddress(...) ends 1111.
+ *   Every clone is deployed via CREATE2 with a user-provided salt bound to
+ *   msg.sender.  The resulting address must end in 0x1111.
+ *   Mine off-chain: `predictTokenAddress(creator, salt, impl)` until match.
  */
 contract LaunchpadFactory {
 
@@ -99,28 +96,26 @@ contract LaunchpadFactory {
         TokenType tokenType;
         address   creator;
 
-        // supply split
         uint256 totalSupply;
         uint256 liquidityTokens;   // 38 %
         uint256 creatorTokens;     // 5 % or 0
-        uint256 bcTokensTotal;     // BC allocation
+        uint256 bcTokensTotal;
         uint256 bcTokensSold;
 
-        // AMM state (all in BNB wei)
+        // AMM state — all values in wei
         uint256 virtualBNB;
-        uint256 k;                 // virtualBNB × bcTokensTotal  (invariant)
+        uint256 k;                 // virtualBNB × bcTokensTotal (invariant)
         uint256 raisedBNB;
         uint256 migrationTarget;
 
-        // antibot
+        address pair;              // PancakeSwap pair — created at launch, liquidity added at migration
+
         bool    antibotEnabled;
         uint256 creationBlock;
-        uint256 tradingBlock;      // creationBlock + offset (10 – 199)
+        uint256 tradingBlock;      // creationBlock + antibotBlocks (10 – 199)
 
         bool migrated;
     }
-
-    // ─── Params structs ───────────────────────────────────────────────────
 
     struct BaseParams {
         string       name;
@@ -128,22 +123,19 @@ contract LaunchpadFactory {
         SupplyOption supplyOption;
         bool         enableCreatorAlloc;
         bool         enableAntibot;
-        uint256      antibotBlocks;            // 10 – 199; ignored if antibot disabled
-        uint256      customVirtualBNBUSD;      // 0 → use factory default ($2 000)
-        uint256      customMigrationTargetUSD; // 0 → use factory default ($11 000)
+        uint256      antibotBlocks;         // 10 – 199; ignored if antibot disabled
+        uint256      customVirtualBNB;      // BNB wei; 0 → use factory default
+        uint256      customMigrationTarget; // BNB wei; 0 → use factory default
         /**
-         * @notice Off-chain metadata URI for the token (IPFS, HTTPS, etc.).
-         *         Expected JSON shape: { name, description, image, external_link }
-         *         Can be updated post-deployment via token.setMetaURI().
-         *         Empty string is valid (no metadata).
+         * @notice Off-chain metadata URI (IPFS/HTTPS).
+         *         JSON shape: { name, description, image, external_link }
+         *         Updatable post-deployment via token.setMetaURI().
          */
         string       metaURI;
-
         /**
-         * @notice User-supplied salt component for CREATE2 vanity addressing.
-         *         Mine off-chain via `predictTokenAddress` until the address
-         *         ends in 0x1111.  The actual CREATE2 salt is derived as
-         *         keccak256(abi.encode(msg.sender, salt)) to prevent front-running.
+         * @notice Salt for CREATE2 vanity addressing.
+         *         The on-chain salt is keccak256(abi.encode(msg.sender, salt)).
+         *         Mine off-chain via predictTokenAddress() until address ends 0x1111.
          */
         bytes32      salt;
     }
@@ -159,107 +151,82 @@ contract LaunchpadFactory {
     struct CreateRFLParams {
         BaseParams   base;
         address[2]   wallets;    // marketing, team
-        uint256[5]   buyTaxes;   // marketing, team, lp, burn, reflection (bps)
-        uint256[5]   sellTaxes;
         uint256      swapThreshold;
+        // Taxes are not set at creation — token owner must call setBuyTaxes /
+        // setSellTaxes post-deployment.  Default is 0 % for all components.
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // TWAP ORACLE STATE
-    // ─────────────────────────────────────────────────────────────────────
-
-    /// @notice The USDC token used in the oracle pair (for isToken0 derivation).
-    address public usdcToken;
-
-    /// @notice PancakeSwap V2 USDC/WBNB pair used as price oracle.
-    address public usdcWbnbPair;
-
-    /// @notice true if USDC is token0 in the pair, false if token1.
-    bool public usdcIsToken0;
-
-    /// @notice Decimals of the USDC token (6 for Circle USDC, 18 for Binance-peg).
-    uint8 public usdcDecimals;
-
-    /// @notice Stored cumulative price at last TWAP update.
-    uint256 public priceCumulativeLast;
-
-    /// @notice Pair block-timestamp at last TWAP update (truncated to uint32).
-    uint32 public twapTimestampLast;
-
-    /**
-     * @notice TWAP price: WBNB wei per 1 USDC unit, stored as UQ112x112.
-     *         Compute actual BNB: (twapPriceAvg × usdcUnits) >> 112
-     *         Zero until updateTWAP() has been called successfully once.
-     */
-    uint256 public twapPriceAvg;
-
-    /// @notice Minimum seconds between TWAP price updates (30 minutes).
-    uint256 public constant TWAP_PERIOD = 30 minutes;
-
-    /**
-     * @notice Maximum number of blocks since the last successful TWAP
-     *         computation before the price is considered stale.
-     *         Default: 1 440 blocks ≈ 2 hours on BSC (5 s / block).
-     *         Configurable by the factory owner via setTwapMaxAgeBlocks().
-     */
-    uint256 public twapMaxAgeBlocks;
-
-    /**
-     * @notice Block number of the last block where the TWAP price was
-     *         successfully refreshed (i.e., the 30-min period had elapsed).
-     *         Used for block-based staleness check in usdToBNB().
-     */
-    uint256 public twapLastSuccessBlock;
-
-    /**
-     * @notice Block number of the last call to _tryUpdateTWAP().
-     *         Used for once-per-block deduplication regardless of success.
-     */
-    uint256 public lastTwapUpdateBlock;
-
-    // ─────────────────────────────────────────────────────────────────────
-    // FACTORY STATE
+    // STATE
     // ─────────────────────────────────────────────────────────────────────
 
     address public owner;
 
-    // Implementation contracts (clone targets)
     address public immutable standardImpl;
     address public immutable taxImpl;
     address public immutable reflectionImpl;
 
-    // DEX
     address public pancakeRouter;
 
-    // Fees — all USD values use 18-decimal fixed point (1e18 = $1.00)
-    uint256 public creationFeeUSD;     // default: 1e18  ($1.00)
-    uint256 public tradeFee;           // bps, default 100 = 1 %
+    uint256 public creationFee;  // BNB wei
+    uint256 public platformFee;  // bps — goes to feeRecipient
+    uint256 public charityFee;   // bps — goes to charityWallet
     address public feeRecipient;
-    uint256 public accumulatedFees;    // BNB accumulated, withdrawn by owner
+    address public charityWallet; // address(0) → charity portion redirected to feeRecipient
 
-    // Default bonding-curve parameters (USD, 18-decimal)
-    uint256 public defaultVirtualBNBUSD;      // default: 2_000e18  ($2 000 virtual mcap)
-    uint256 public defaultMigrationTargetUSD; // default: 11_000e18 ($11 000 raise target)
+    uint256 public defaultVirtualBNB;      // BNB wei — bonding curve seed
+    uint256 public defaultMigrationTarget; // BNB wei — raise target
 
-    // Per-token data
+    mapping(address => bool) public managers;
+
     mapping(address => TokenConfig) public tokens;
     address[] public allTokens;
-
-    // Creator index
     mapping(address => address[]) private _tokensByCreator;
 
-    // ─── Constants ───────────────────────────────────────────────────────
-    uint256 private constant LIQUIDITY_BPS = 3800;
-    uint256 private constant CREATOR_BPS   =  500;
-    uint256 private constant BPS_DENOM     = 10000;
-    address private constant DEAD = 0x000000000000000000000000000000000000dEaD;
+    uint256 private constant LIQUIDITY_BPS      = 3800;
+    uint256 private constant CREATOR_BPS        =  500;
+    uint256 private constant BPS_DENOM          = 10000;
+    uint256 private constant MAX_TOTAL_FEE      =  250; // 2.5 %
+
+    /// @notice Suggested default creation fee: 0.0011 BNB.
+    uint256 public  constant DEFAULT_CREATION_FEE = 0.0011 ether;
+    address private constant DEAD               = 0x000000000000000000000000000000000000dEaD;
     uint256 private constant ANTIBOT_MIN_BLOCKS =  10;
     uint256 private constant ANTIBOT_MAX_BLOCKS = 199;
 
-    // Reentrancy
     uint256 private _status;
     uint256 private constant _NOT_ENTERED = 1;
     uint256 private constant _ENTERED     = 2;
+
+    // Running sum of all active tc.raisedBNB.  Used to isolate stray BNB for rescueBNB().
+    uint256 private _totalRaisedBNB;
+
+    address public pendingOwner;
+
+    // ─────────────────────────────────────────────────────────────────────
+    // ERRORS
+    // ─────────────────────────────────────────────────────────────────────
+
+    error NotOwner();
+    error NotPendingOwner();
+    error Unauthorized();
+    error Reentrancy();
+    error ZeroAddress();
+    error ZeroAmount();
+    error FeeExceedsMax();
+    error InsufficientCreationFee(uint256 required, uint256 provided);
+    error UnknownToken();
+    error AlreadyMigrated();
+    error ExceedsSoldSupply();
+    error InsufficientPoolBNB();
+    error SlippageTooLittleBNB();
+    error SlippageTooFewTokens();
+    error MigrationTargetNotReached();
+    error CloneFailed();
+    error VanityAddressRequired();
+    error BNBTransferFailed();
+    error RefundFailed();
+    error AntibotBlocksOutOfRange();
 
     // ─────────────────────────────────────────────────────────────────────
     // EVENTS
@@ -294,26 +261,29 @@ contract LaunchpadFactory {
         uint256 liquidityBNB,
         uint256 liquidityTokens
     );
-    event TWAPUpdated(uint256 priceAvg, uint256 blockNumber);
-    event DefaultParamsUpdated(uint256 virtualBNBUSD, uint256 migrationTargetUSD);
-    event FeesWithdrawn(address recipient, uint256 amount);
+    event DefaultParamsUpdated(uint256 virtualBNB, uint256 migrationTarget);
+    event CreationFeeUpdated(uint256 fee);
     event RouterUpdated(address router);
     event FeeRecipientUpdated(address recipient);
-    event TradeFeeUpdated(uint256 feeBps);
-    event UsdcPairUpdated(address usdcToken, address pair, bool isToken0);
-    event TwapMaxAgeBlocksUpdated(uint256 blocks);
+    event CharityWalletUpdated(address wallet);
+    event PlatformFeeUpdated(uint256 feeBps);
+    event CharityFeeUpdated(uint256 feeBps);
+    event ManagerAdded(address indexed manager);
+    event ManagerRemoved(address indexed manager);
+    event OwnershipTransferProposed(address indexed current, address indexed proposed);
+    event OwnershipTransferred(address indexed prev, address indexed next);
 
     // ─────────────────────────────────────────────────────────────────────
     // MODIFIERS
     // ─────────────────────────────────────────────────────────────────────
 
-    modifier onlyOwner() {
-        require(msg.sender == owner, "Not owner");
+    modifier onlyOwner() { if (msg.sender != owner) revert NotOwner(); _; }
+    modifier onlyOwnerOrManager() {
+        if (msg.sender != owner && !managers[msg.sender]) revert Unauthorized();
         _;
     }
-
     modifier nonReentrant() {
-        require(_status != _ENTERED, "Reentrant call");
+        if (_status == _ENTERED) revert Reentrancy();
         _status = _ENTERED;
         _;
         _status = _NOT_ENTERED;
@@ -324,155 +294,42 @@ contract LaunchpadFactory {
     // ─────────────────────────────────────────────────────────────────────
 
     /**
-     * @param router_       PancakeSwap V2 router
-     * @param feeRecipient_ Address that receives platform fees
-     * @param usdc_         USDC token address (used to derive isToken0)
-     * @param usdcWbnbPair_ PancakeSwap V2 USDC/WBNB pair (price oracle)
-     * @param usdcDecimals_ USDC decimals: 6 (Circle) or 18 (Binance-peg)
-     * @param tradeFee_     Trade fee in bps — recommended default: 100 (1 %)
-     *
-     * Defaults: creationFee = $1, virtualBNB = $2 000, migrationTarget = $11 000,
-     *           twapMaxAgeBlocks = 1 440 (~2 h on BSC).
+     * @param router_               PancakeSwap V2 router
+     * @param feeRecipient_         Address that receives platform fees
+     * @param creationFee_          Token creation fee in BNB wei
+     * @param platformFee_          Platform trade fee in bps
+     * @param charityFee_           Charity trade fee in bps
+     * @param defaultVirtualBNB_    Default virtual BNB seeded into bonding curve in BNB wei
+     * @param defaultMigrationTarget_ Default BNB raise target before DEX migration in BNB wei
      */
     constructor(
         address router_,
         address feeRecipient_,
-        address usdc_,
-        address usdcWbnbPair_,
-        uint8   usdcDecimals_,
-        uint256 tradeFee_
+        uint256 creationFee_,
+        uint256 platformFee_,
+        uint256 charityFee_,
+        uint256 defaultVirtualBNB_,
+        uint256 defaultMigrationTarget_
     ) {
-        require(router_       != address(0), "Zero router");
-        require(feeRecipient_ != address(0), "Zero fee recipient");
-        require(usdc_         != address(0), "Zero USDC");
-        require(usdcWbnbPair_ != address(0), "Zero USDC pair");
-        require(tradeFee_ <= 500,            "Trade fee > 5 %");
-        require(usdcDecimals_ == 6 || usdcDecimals_ == 18, "Unsupported USDC decimals");
+        if (router_       == address(0)) revert ZeroAddress();
+        if (feeRecipient_ == address(0)) revert ZeroAddress();
+        if (platformFee_ + charityFee_ > MAX_TOTAL_FEE) revert FeeExceedsMax();
+        if (defaultVirtualBNB_      == 0) revert ZeroAmount();
+        if (defaultMigrationTarget_ == 0) revert ZeroAmount();
 
-        owner                      = msg.sender;
-        pancakeRouter              = router_;
-        feeRecipient               = feeRecipient_;
-        usdcToken                  = usdc_;
-        usdcWbnbPair               = usdcWbnbPair_;
-        usdcDecimals               = usdcDecimals_;
-        tradeFee                   = tradeFee_;
-        creationFeeUSD             = 1e18;          // $1.00
-        defaultVirtualBNBUSD       = 2_000e18;      // $2 000
-        defaultMigrationTargetUSD  = 11_000e18;     // $11 000
-        twapMaxAgeBlocks           = 1_440;         // ~2 h at 5 s/block on BSC
-        _status                    = _NOT_ENTERED;
+        owner                  = msg.sender;
+        pancakeRouter          = router_;
+        feeRecipient           = feeRecipient_;
+        creationFee            = creationFee_;
+        platformFee            = platformFee_;
+        charityFee             = charityFee_;
+        defaultVirtualBNB      = defaultVirtualBNB_;
+        defaultMigrationTarget = defaultMigrationTarget_;
+        _status                = _NOT_ENTERED;
 
-        // Derive isToken0 from the pair itself
-        usdcIsToken0 = IPancakeV2Pair(usdcWbnbPair_).token0() == usdc_;
-
-        // Snapshot cumulative price so the first updateTWAP() can compute a delta.
-        (,, uint32 ts) = IPancakeV2Pair(usdcWbnbPair_).getReserves();
-        priceCumulativeLast = usdcIsToken0
-            ? IPancakeV2Pair(usdcWbnbPair_).price0CumulativeLast()
-            : IPancakeV2Pair(usdcWbnbPair_).price1CumulativeLast();
-        twapTimestampLast = ts;
-
-        // Deploy token implementations (clone targets)
         standardImpl   = address(new StandardToken());
         taxImpl        = address(new TaxToken());
         reflectionImpl = address(new ReflectionToken());
-    }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // TWAP ORACLE
-    // ─────────────────────────────────────────────────────────────────────
-
-    /**
-     * @notice Manually trigger a TWAP update.
-     *         Callable by anyone.  Silently no-ops if the period has not
-     *         elapsed yet or if the oracle was already refreshed this block.
-     */
-    function updateTWAP() external {
-        _tryUpdateTWAP();
-    }
-
-    /**
-     * @dev Attempt to refresh the TWAP price.  Executes at most once per block;
-     *      further calls within the same block are silent no-ops.
-     *      Also silently skips if TWAP_PERIOD has not yet elapsed.
-     *      Never reverts — safe to call from any interaction.
-     */
-    function _tryUpdateTWAP() internal {
-        if (block.number == lastTwapUpdateBlock) return;
-        lastTwapUpdateBlock = block.number;
-
-        (
-            uint256 price0Cumulative,
-            uint256 price1Cumulative,
-            uint32  blockTimestamp
-        ) = _currentCumulativePrices();
-
-        uint32 timeElapsed = blockTimestamp - twapTimestampLast; // uint32 overflow intentional
-
-        if (timeElapsed < TWAP_PERIOD) return;
-
-        uint256 currentCumulative = usdcIsToken0 ? price0Cumulative : price1Cumulative;
-        uint256 newPriceAvg = (currentCumulative - priceCumulativeLast) / timeElapsed;
-
-        if (newPriceAvg == 0) return;
-
-        twapPriceAvg        = newPriceAvg;
-        priceCumulativeLast = currentCumulative;
-        twapTimestampLast   = blockTimestamp;
-        twapLastSuccessBlock = block.number;
-
-        emit TWAPUpdated(newPriceAvg, block.number);
-    }
-
-    /**
-     * @notice Returns the current live spot cumulative prices from the pair,
-     *         including any price movement since the pair's last on-chain update.
-     *         Mirrors UniswapV2OracleLibrary.currentCumulativePrices (overflow safe).
-     */
-    function _currentCumulativePrices()
-        internal view
-        returns (uint256 price0Cumulative, uint256 price1Cumulative, uint32 blockTimestamp)
-    {
-        blockTimestamp   = uint32(block.timestamp);
-        price0Cumulative = IPancakeV2Pair(usdcWbnbPair).price0CumulativeLast();
-        price1Cumulative = IPancakeV2Pair(usdcWbnbPair).price1CumulativeLast();
-
-        (uint112 reserve0, uint112 reserve1, uint32 pairTs) =
-            IPancakeV2Pair(usdcWbnbPair).getReserves();
-
-        if (pairTs != blockTimestamp && reserve0 > 0 && reserve1 > 0) {
-            uint32 dt = blockTimestamp - pairTs;
-            unchecked {
-                price0Cumulative += (uint256(reserve1) << 112) / uint256(reserve0) * dt;
-                price1Cumulative += (uint256(reserve0) << 112) / uint256(reserve1) * dt;
-            }
-        }
-    }
-
-    /**
-     * @notice Convert a USD amount to BNB wei using the stored TWAP.
-     *         Reverts if the TWAP has not been successfully refreshed within
-     *         twapMaxAgeBlocks blocks.
-     * @param usd18  USD amount with 18-decimal precision (1e18 = $1.00)
-     * @return bnb   BNB in wei
-     */
-    function usdToBNB(uint256 usd18) public view returns (uint256 bnb) {
-        require(twapPriceAvg > 0, "TWAP not initialized");
-        require(
-            block.number - twapLastSuccessBlock <= twapMaxAgeBlocks,
-            "TWAP stale"
-        );
-
-        uint256 usdcUnits;
-        if (usdcDecimals >= 18) {
-            usdcUnits = usd18 * (10 ** (usdcDecimals - 18));
-        } else {
-            usdcUnits = usd18 / (10 ** (18 - usdcDecimals));
-        }
-
-        // twapPriceAvg is UQ112x112 (WBNB wei per 1 USDC unit).
-        bnb = (twapPriceAvg * usdcUnits) >> 112;
-        require(bnb > 0, "TWAP: zero BNB output");
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -481,12 +338,10 @@ contract LaunchpadFactory {
 
     /**
      * @notice Create a Standard ERC-20 token.
-     *         msg.value must cover the $1 creation fee (in BNB at TWAP rate).
-     *         Any excess BNB is used as an immediate bonding-curve buy for the
-     *         creator (creator is always antibot-exempt).
+     *         msg.value must cover the creation fee in BNB.
+     *         Any excess BNB is used as an immediate antibot-exempt buy.
      */
     function createToken(BaseParams calldata p) external payable nonReentrant returns (address token) {
-        _tryUpdateTWAP();
         uint256 earlyBuy = _collectCreationFee();
         token = _cloneCreate2(standardImpl, p.salt);
 
@@ -494,7 +349,7 @@ contract LaunchpadFactory {
             = _computeAlloc(_supplyFromOption(p.supplyOption), p.enableCreatorAlloc);
 
         StandardToken(token).initForLaunchpad(p.name, p.symbol, supply, address(this), msg.sender, p.metaURI);
-        _registerToken(token, TokenType.STANDARD, supply, liqTokens, creatorTokens, bcTokens, p);
+        _registerToken(token, TokenType.STANDARD, supply, liqTokens, creatorTokens, bcTokens, address(0), p);
 
         if (earlyBuy > 0) _executeBuy(token, msg.sender, earlyBuy, 0, true);
 
@@ -504,9 +359,10 @@ contract LaunchpadFactory {
 
     /**
      * @notice Create a Tax Token.
+     *         msg.value must cover the creation fee in BNB.
+     *         Any excess BNB is used as an immediate antibot-exempt buy.
      */
     function createTT(CreateTTParams calldata p) external payable nonReentrant returns (address token) {
-        _tryUpdateTWAP();
         uint256 earlyBuy = _collectCreationFee();
         token = _cloneCreate2(taxImpl, p.base.salt);
 
@@ -515,9 +371,11 @@ contract LaunchpadFactory {
 
         TaxToken(token).initForLaunchpad(
             p.base.name, p.base.symbol, supply, address(this),
-            p.wallets, p.buyTaxes, p.sellTaxes, p.swapThreshold, msg.sender, p.base.metaURI
+            p.wallets, p.buyTaxes, p.sellTaxes, p.swapThreshold, msg.sender, p.base.metaURI,
+            pancakeRouter
         );
-        _registerToken(token, TokenType.TAX, supply, liqTokens, creatorTokens, bcTokens, p.base);
+        _registerToken(token, TokenType.TAX, supply, liqTokens, creatorTokens, bcTokens,
+            TaxToken(token).pancakePair(), p.base);
 
         if (earlyBuy > 0) _executeBuy(token, msg.sender, earlyBuy, 0, true);
 
@@ -527,9 +385,12 @@ contract LaunchpadFactory {
 
     /**
      * @notice Create a Reflection Token.
+     *         msg.value must cover the creation fee in BNB.
+     *         Any excess BNB is used as an immediate antibot-exempt buy.
+     *         Taxes start at 0 % — the token owner must call setBuyTaxes /
+     *         setSellTaxes post-deployment to enable reflection.
      */
     function createRFL(CreateRFLParams calldata p) external payable nonReentrant returns (address token) {
-        _tryUpdateTWAP();
         uint256 earlyBuy = _collectCreationFee();
         token = _cloneCreate2(reflectionImpl, p.base.salt);
 
@@ -538,9 +399,11 @@ contract LaunchpadFactory {
 
         ReflectionToken(token).initForLaunchpad(
             p.base.name, p.base.symbol, supply, address(this),
-            p.wallets, p.buyTaxes, p.sellTaxes, p.swapThreshold, msg.sender, p.base.metaURI
+            p.wallets, p.swapThreshold, msg.sender, p.base.metaURI,
+            pancakeRouter
         );
-        _registerToken(token, TokenType.REFLECTION, supply, liqTokens, creatorTokens, bcTokens, p.base);
+        _registerToken(token, TokenType.REFLECTION, supply, liqTokens, creatorTokens, bcTokens,
+            ReflectionToken(token).pancakePair(), p.base);
 
         if (earlyBuy > 0) _executeBuy(token, msg.sender, earlyBuy, 0, true);
 
@@ -558,8 +421,7 @@ contract LaunchpadFactory {
      * @param minOut  Minimum tokens to receive (slippage guard)
      */
     function buy(address token_, uint256 minOut) external payable nonReentrant {
-        _tryUpdateTWAP();
-        require(msg.value > 0, "Zero BNB");
+        if (msg.value == 0) revert ZeroAmount();
         _executeBuy(token_, msg.sender, msg.value, minOut, false);
     }
 
@@ -574,12 +436,11 @@ contract LaunchpadFactory {
      * @param minBNBOut Minimum BNB to receive (slippage guard)
      */
     function sell(address token_, uint256 amountIn, uint256 minBNBOut) external nonReentrant {
-        _tryUpdateTWAP();
         TokenConfig storage tc = tokens[token_];
-        require(tc.token != address(0),      "Unknown token");
-        require(!tc.migrated,                "Already migrated");
-        require(amountIn > 0,                "Zero amount");
-        require(tc.bcTokensSold >= amountIn, "Exceeds sold supply");
+        if (tc.token == address(0)) revert UnknownToken();
+        if (tc.migrated)            revert AlreadyMigrated();
+        if (amountIn == 0)          revert ZeroAmount();
+        if (tc.bcTokensSold < amountIn) revert ExceedsSoldSupply();
 
         ILaunchpadToken(token_).transferFrom(msg.sender, address(this), amountIn);
 
@@ -588,19 +449,21 @@ contract LaunchpadFactory {
         uint256 newPoolTokens = poolTokens + amountIn;
         uint256 newPoolBNB    = tc.k / newPoolTokens;
         uint256 grossBNB      = poolBNB - newPoolBNB;
-        require(grossBNB <= tc.raisedBNB, "Insufficient pool BNB");
+        if (grossBNB > tc.raisedBNB) revert InsufficientPoolBNB();
 
-        uint256 fee    = (grossBNB * tradeFee) / BPS_DENOM;
+        uint256 totalFee = platformFee + charityFee;
+        uint256 fee    = (grossBNB * totalFee) / BPS_DENOM;
         uint256 netBNB = grossBNB - fee;
-        require(netBNB >= minBNBOut, "Slippage: too little BNB");
+        if (netBNB < minBNBOut) revert SlippageTooLittleBNB();
 
         tc.raisedBNB    -= grossBNB;
+        _totalRaisedBNB -= grossBNB;
         tc.bcTokensSold -= amountIn;
-        accumulatedFees += fee;
 
         (bool ok,) = payable(msg.sender).call{value: netBNB}("");
-        require(ok, "BNB transfer failed");
+        if (!ok) revert BNBTransferFailed();
 
+        _dispatchFee(fee);
         emit TokenSold(token_, msg.sender, amountIn, netBNB, tc.raisedBNB);
     }
 
@@ -613,11 +476,10 @@ contract LaunchpadFactory {
      *         Permissionless once raisedBNB ≥ migrationTarget.
      */
     function migrate(address token_) external nonReentrant {
-        _tryUpdateTWAP();
         TokenConfig storage tc = tokens[token_];
-        require(tc.token != address(0),             "Unknown token");
-        require(!tc.migrated,                       "Already migrated");
-        require(tc.raisedBNB >= tc.migrationTarget, "Migration target not reached");
+        if (tc.token == address(0))            revert UnknownToken();
+        if (tc.migrated)                       revert AlreadyMigrated();
+        if (tc.raisedBNB < tc.migrationTarget) revert MigrationTargetNotReached();
 
         _doMigrate(tc, token_);
     }
@@ -632,32 +494,34 @@ contract LaunchpadFactory {
      *      Migration-cap guarantee: if bnbIn is enough to reach or exceed the
      *      migration target, we cap the effective BNB to exactly what is needed,
      *      sell ALL remaining BC tokens to the buyer, and refund the rest.
-     *      This ensures the bonding curve is fully exhausted at the target —
-     *      no BC tokens are left over to burn at migration.
+     *      This ensures the bonding curve is fully exhausted at the target.
      *
-     * @param skipAntibot  When true the antibot penalty is not applied.
-     *                     Only the initial early buy embedded in createToken /
-     *                     createTT / createRFL passes true here — that buy is
-     *                     part of the atomic creation transaction and is the one
-     *                     intentional creator pre-buy.  All subsequent buy()
-     *                     calls, including those made by the creator in the same
-     *                     or any later antibot block, receive the full penalty.
+     * @param skipAntibot  Only true for the atomic early buy inside createToken /
+     *                     createTT / createRFL.  All subsequent buy() calls —
+     *                     including those from the creator — receive the full
+     *                     decaying penalty.
      */
-    function _executeBuy(address token_, address buyer, uint256 bnbIn, uint256 minOut, bool skipAntibot) internal {
+    function _executeBuy(
+        address token_,
+        address buyer,
+        uint256 bnbIn,
+        uint256 minOut,
+        bool    skipAntibot
+    ) internal {
         TokenConfig storage tc = tokens[token_];
-        require(tc.token != address(0), "Unknown token");
-        require(!tc.migrated,           "Already migrated");
+        if (tc.token == address(0)) revert UnknownToken();
+        if (tc.migrated)            revert AlreadyMigrated();
 
         uint256 poolBNB    = tc.virtualBNB + tc.raisedBNB;
         uint256 poolTokens = tc.bcTokensTotal - tc.bcTokensSold;
 
-        // ── Migration cap ─────────────────────────────────────────────────
-        // grossNeeded = ceil(bnbNeeded / (1 - tradeFee%)) — gross BNB that,
-        // after fee deduction, yields exactly the net BNB needed to hit target.
+        // grossNeeded = ceil(bnbNeeded / (1 - totalFee%))
+        // After fee deduction, net BNB collected equals exactly migrationTarget.
+        uint256 totalFee    = platformFee + charityFee;
         uint256 bnbNeeded   = tc.migrationTarget - tc.raisedBNB;
-        uint256 grossNeeded = tradeFee == 0
+        uint256 grossNeeded = totalFee == 0
             ? bnbNeeded
-            : (bnbNeeded * BPS_DENOM + (BPS_DENOM - tradeFee) - 1) / (BPS_DENOM - tradeFee);
+            : (bnbNeeded * BPS_DENOM + (BPS_DENOM - totalFee) - 1) / (BPS_DENOM - totalFee);
 
         uint256 refund;
         uint256 fee;
@@ -665,31 +529,27 @@ contract LaunchpadFactory {
         uint256 tokensOut;
 
         if (bnbIn >= grossNeeded) {
-            // ── Crossing buy: sell all remaining tokens, cap BNB collected ──
             refund    = bnbIn - grossNeeded;
-            fee       = (grossNeeded * tradeFee) / BPS_DENOM;
-            netBNB    = grossNeeded - fee;  // ≥ bnbNeeded (due to ceil rounding)
+            fee       = (grossNeeded * totalFee) / BPS_DENOM;
+            netBNB    = grossNeeded - fee;
             tokensOut = poolTokens;
         } else {
-            // ── Normal AMM buy ────────────────────────────────────────────
-            fee       = (bnbIn * tradeFee) / BPS_DENOM;
+            fee       = (bnbIn * totalFee) / BPS_DENOM;
             netBNB    = bnbIn - fee;
             uint256 newPoolBNB = poolBNB + netBNB;
             tokensOut = poolTokens - (tc.k / newPoolBNB);
             if (tokensOut > poolTokens) tokensOut = poolTokens;
         }
 
-        require(tokensOut >= minOut, "Slippage: too few tokens");
-        require(tokensOut > 0,       "Zero tokens out");
+        if (tokensOut == 0)     revert ZeroAmount();
+        if (tokensOut < minOut) revert SlippageTooFewTokens();
 
-        accumulatedFees += fee;
         tc.raisedBNB    += netBNB;
+        _totalRaisedBNB += netBNB;
         tc.bcTokensSold += tokensOut;
 
-        // ── Decaying antibot ──────────────────────────────────────────────
-        // skipAntibot is only true for the atomic early buy inside createToken /
-        // createTT / createRFL.  All buy() calls — including those from the
-        // creator in the same or any later antibot block — receive the penalty.
+        _dispatchFee(fee);
+
         uint256 tokensToUser = tokensOut;
         uint256 tokensToDead = 0;
 
@@ -704,43 +564,46 @@ contract LaunchpadFactory {
         if (tokensToDead > 0) ILaunchpadToken(token_).transfer(DEAD, tokensToDead);
         if (tokensToUser  > 0) ILaunchpadToken(token_).transfer(buyer, tokensToUser);
 
-        // Refund excess BNB before migration (state fully updated, nonReentrant guards)
         if (refund > 0) {
             (bool ok,) = payable(buyer).call{value: refund}("");
-            require(ok, "Refund failed");
+            if (!ok) revert RefundFailed();
         }
 
         emit TokenBought(token_, buyer, bnbIn - refund, tokensOut, tokensToDead, tc.raisedBNB);
 
-        // Auto-migrate if crossing target
         if (!tc.migrated && tc.raisedBNB >= tc.migrationTarget) {
             _doMigrate(tc, token_);
         }
     }
 
-    /// @dev Shared migration logic (called from migrate() and _executeBuy).
+    /// @dev Shared migration logic — called from migrate() and _executeBuy().
     function _doMigrate(TokenConfig storage tc, address token_) internal {
         tc.migrated = true;
 
         uint256 migrationBNB = tc.raisedBNB;
         uint256 liqTokens    = tc.liquidityTokens;
 
+        _totalRaisedBNB -= migrationBNB;
+
+        address pair_ = tc.pair;
+
         ILaunchpadToken(token_).approve(pancakeRouter, liqTokens);
 
-        // LP tokens locked to dead wallet forever
+        // LP tokens sent to dead wallet — permanently locked.
+        // Minimums at 99 % to protect against pre-created pair sandwich attacks.
+        uint256 amountTokenMin = liqTokens    * 9900 / 10000;
+        uint256 amountETHMin   = migrationBNB * 9900 / 10000;
         IPancakeRouter02(pancakeRouter).addLiquidityETH{value: migrationBNB}(
-            token_, liqTokens, 0, 0, DEAD, block.timestamp + 300
+            token_, liqTokens, amountTokenMin, amountETHMin, DEAD, block.timestamp + 300
         );
 
-        address dexFactory = IPancakeRouter02(pancakeRouter).factory();
-        address weth_      = IPancakeRouter02(pancakeRouter).WETH();
-        address pair_      = IPancakeFactory(dexFactory).getPair(token_, weth_);
-        require(pair_ != address(0), "Pair not created");
+        // StandardToken has no DEX-specific setup; only TAX and REFLECTION tokens need it.
+        if (tc.tokenType != TokenType.STANDARD) {
+            IPostMigrate(token_).postMigrateSetup();
+        }
 
-        ILaunchpadToken(token_).enableTrading(pair_, pancakeRouter);
-
-        // Burn any unsold BC tokens (should be zero after migration-cap enforcement,
-        // but kept as a safety net for edge cases such as direct migrate() calls).
+        // Safety net: burn any unsold BC tokens (should be zero via migration-cap,
+        // but handles edge cases such as a direct migrate() call).
         uint256 unsold = tc.bcTokensTotal - tc.bcTokensSold;
         if (unsold > 0) ILaunchpadToken(token_).transfer(DEAD, unsold);
 
@@ -748,7 +611,50 @@ contract LaunchpadFactory {
         emit TokenMigrated(token_, pair_, migrationBNB, liqTokens);
     }
 
-    /// @dev Register token config after clone + init.
+    /// @dev Deduct creation fee, dispatch it immediately, and return the excess as early buy.
+    function _collectCreationFee() internal returns (uint256 earlyBuy) {
+        if (msg.value < creationFee) revert InsufficientCreationFee(creationFee, msg.value);
+        earlyBuy = msg.value - creationFee;
+        _dispatchFee(creationFee);
+    }
+
+    function _computeAlloc(uint256 supply, bool hasCreator)
+        internal pure
+        returns (uint256 total, uint256 liqTokens, uint256 creatorTokens, uint256 bcTokens)
+    {
+        total         = supply;
+        liqTokens     = (supply * LIQUIDITY_BPS) / BPS_DENOM;
+        creatorTokens = hasCreator ? (supply * CREATOR_BPS) / BPS_DENOM : 0;
+        bcTokens      = supply - liqTokens - creatorTokens;
+    }
+
+    function _supplyFromOption(SupplyOption opt) internal pure returns (uint256) {
+        if (opt == SupplyOption.ONE)      return 1e18;
+        if (opt == SupplyOption.THOUSAND) return 1_000e18;
+        if (opt == SupplyOption.MILLION)  return 1_000_000e18;
+        return 1_000_000_000e18;
+    }
+
+    /**
+     * @dev Deploy an EIP-1167 minimal proxy via CREATE2.
+     *      The actual salt is keccak256(abi.encode(msg.sender, userSalt)),
+     *      binding it to the creator to prevent cross-sender front-running.
+     *      The resulting address MUST end in 0x1111.
+     */
+    function _cloneCreate2(address implementation, bytes32 userSalt) internal returns (address instance) {
+        bytes32 salt = keccak256(abi.encode(msg.sender, userSalt));
+        assembly {
+            let ptr := mload(0x40)
+            mstore(ptr,         0x3d602d80600a3d3981f3363d3d373d3d3d363d73000000000000000000000000)
+            mstore(add(ptr, 0x14), shl(0x60, implementation))
+            mstore(add(ptr, 0x28), 0x5af43d82803e903d91602b57fd5bf30000000000000000000000000000000000)
+            instance := create2(0, ptr, 0x37, salt)
+        }
+        if (instance == address(0))              revert CloneFailed();
+        if (uint16(uint160(instance)) != 0x1111) revert VanityAddressRequired();
+    }
+
+    /// @dev Register token config and set up creator vesting if applicable.
     function _registerToken(
         address       token_,
         TokenType     tokenType_,
@@ -756,21 +662,19 @@ contract LaunchpadFactory {
         uint256       liqTokens,
         uint256       creatorTokens,
         uint256       bcTokens,
+        address       pair_,
         BaseParams calldata p
     ) internal {
-        uint256 vBNBusd = p.customVirtualBNBUSD      > 0 ? p.customVirtualBNBUSD      : defaultVirtualBNBUSD;
-        uint256 mTgtusd = p.customMigrationTargetUSD > 0 ? p.customMigrationTargetUSD : defaultMigrationTargetUSD;
+        uint256 vBNB = p.customVirtualBNB      > 0 ? p.customVirtualBNB      : defaultVirtualBNB;
+        uint256 mTgt = p.customMigrationTarget > 0 ? p.customMigrationTarget : defaultMigrationTarget;
 
-        uint256 vBNB = usdToBNB(vBNBusd);
-        uint256 mTgt = usdToBNB(mTgtusd);
+        if (vBNB == 0) revert ZeroAmount();
+        if (mTgt == 0) revert ZeroAmount();
 
         uint256 antibotBlocks = 0;
         if (p.enableAntibot) {
-            require(
-                p.antibotBlocks >= ANTIBOT_MIN_BLOCKS &&
-                p.antibotBlocks <= ANTIBOT_MAX_BLOCKS,
-                "Antibot blocks out of range"
-            );
+            if (p.antibotBlocks < ANTIBOT_MIN_BLOCKS || p.antibotBlocks > ANTIBOT_MAX_BLOCKS)
+                revert AntibotBlocksOutOfRange();
             antibotBlocks = p.antibotBlocks;
         }
 
@@ -795,156 +699,118 @@ contract LaunchpadFactory {
         allTokens.push(token_);
         _tokensByCreator[msg.sender].push(token_);
 
-        // ── Creator vesting: deposit tokens into the token contract itself ──
+        // pair_ is set by the token itself during initForLaunchpad (address(0) for StandardToken).
+        tc.pair = pair_;
+
         if (creatorTokens > 0) {
             ILaunchpadToken(token_).transfer(token_, creatorTokens);
             ILaunchpadToken(token_).setupVesting(msg.sender, creatorTokens);
         }
     }
 
-    /// @dev Deduct $1 creation fee (BNB equivalent); return excess for early buy.
-    function _collectCreationFee() internal returns (uint256 earlyBuy) {
-        uint256 feeBNB = usdToBNB(creationFeeUSD);
-        require(msg.value >= feeBNB, "Insufficient creation fee");
-        accumulatedFees += feeBNB;
-        earlyBuy = msg.value - feeBNB;
-    }
-
-    function _computeAlloc(uint256 supply, bool hasCreator)
-        internal pure
-        returns (uint256 total, uint256 liqTokens, uint256 creatorTokens, uint256 bcTokens)
-    {
-        total         = supply;
-        liqTokens     = (supply * LIQUIDITY_BPS) / BPS_DENOM;
-        creatorTokens = hasCreator ? (supply * CREATOR_BPS) / BPS_DENOM : 0;
-        bcTokens      = supply - liqTokens - creatorTokens;
-    }
-
-    function _supplyFromOption(SupplyOption opt) internal pure returns (uint256) {
-        if (opt == SupplyOption.ONE)      return 1e18;
-        if (opt == SupplyOption.THOUSAND) return 1_000e18;
-        if (opt == SupplyOption.MILLION)  return 1_000_000e18;
-        return 1_000_000_000e18; // BILLION
-    }
-
-    /**
-     * @dev Deploy an EIP-1167 minimal proxy via CREATE2.
-     *      The actual salt is keccak256(abi.encode(msg.sender, userSalt)) so that
-     *      the same userSalt used by different senders produces different addresses,
-     *      preventing cross-sender front-running.
-     *
-     *      The resulting address MUST end in 0x1111 (last 4 hex digits).
-     *      Use predictTokenAddress() off-chain to mine a valid salt.
-     */
-    function _cloneCreate2(address implementation, bytes32 userSalt) internal returns (address instance) {
-        bytes32 salt = keccak256(abi.encode(msg.sender, userSalt));
-        assembly {
-            let ptr := mload(0x40)
-            mstore(ptr,         0x3d602d80600a3d3981f3363d3d373d3d3d363d73000000000000000000000000)
-            mstore(add(ptr, 0x14), shl(0x60, implementation))
-            mstore(add(ptr, 0x28), 0x5af43d82803e903d91602b57fd5bf30000000000000000000000000000000000)
-            instance := create2(0, ptr, 0x37, salt)
-        }
-        require(instance != address(0),             "Clone failed");
-        require(uint16(uint160(instance)) == 0x1111, "Address must end in 1111");
-    }
-
     // ─────────────────────────────────────────────────────────────────────
     // OWNER ADMIN
     // ─────────────────────────────────────────────────────────────────────
 
-    function setDefaultParams(uint256 virtualBNBUSD_, uint256 migrationTargetUSD_) external onlyOwner {
-        require(virtualBNBUSD_      > 0, "Zero virtualBNB USD");
-        require(migrationTargetUSD_ > 0, "Zero migration target USD");
-        defaultVirtualBNBUSD      = virtualBNBUSD_;
-        defaultMigrationTargetUSD = migrationTargetUSD_;
-        emit DefaultParamsUpdated(virtualBNBUSD_, migrationTargetUSD_);
+    /**
+     * @notice Update the default bonding curve parameters in BNB wei.
+     *         Only affects tokens created after this call.
+     */
+    function setDefaultParams(uint256 virtualBNB_, uint256 migrationTarget_) external onlyOwnerOrManager {
+        if (virtualBNB_      == 0) revert ZeroAmount();
+        if (migrationTarget_ == 0) revert ZeroAmount();
+        defaultVirtualBNB      = virtualBNB_;
+        defaultMigrationTarget = migrationTarget_;
+        emit DefaultParamsUpdated(virtualBNB_, migrationTarget_);
     }
 
-    function setCreationFeeUSD(uint256 feeUSD_) external onlyOwner {
-        require(feeUSD_ > 0, "Zero fee");
-        creationFeeUSD = feeUSD_;
+    /// @notice Set the creation fee in BNB wei.  May be set to zero.
+    function setCreationFee(uint256 fee_) external onlyOwnerOrManager {
+        creationFee = fee_;
+        emit CreationFeeUpdated(fee_);
     }
 
-    /// @notice Update the trade fee. 100 = 1 % (max 5 %).
-    function setTradeFee(uint256 fee_) external onlyOwner {
-        require(fee_ <= 500, "Fee > 5 %");
-        tradeFee = fee_;
-        emit TradeFeeUpdated(fee_);
+    /// @notice Set the platform fee in bps.  Combined charityFee + platformFee must not exceed 250 (2.5 %).
+    function setPlatformFee(uint256 fee_) external onlyOwner {
+        if (fee_ + charityFee > MAX_TOTAL_FEE) revert FeeExceedsMax();
+        platformFee = fee_;
+        emit PlatformFeeUpdated(fee_);
+    }
+
+    /// @notice Set the charity fee in bps.  Combined charityFee + platformFee must not exceed 250 (2.5 %).
+    function setCharityFee(uint256 fee_) external onlyOwner {
+        if (platformFee + fee_ > MAX_TOTAL_FEE) revert FeeExceedsMax();
+        charityFee = fee_;
+        emit CharityFeeUpdated(fee_);
     }
 
     function setFeeRecipient(address rec_) external onlyOwner {
-        require(rec_ != address(0), "Zero address");
+        if (rec_ == address(0)) revert ZeroAddress();
         feeRecipient = rec_;
         emit FeeRecipientUpdated(rec_);
     }
 
     function setRouter(address router_) external onlyOwner {
-        require(router_ != address(0), "Zero address");
+        if (router_ == address(0)) revert ZeroAddress();
+        // Validate the router exposes the expected PancakeSwap V2 interface.
+        IPancakeRouter02(router_).factory();
+        IPancakeRouter02(router_).WETH();
         pancakeRouter = router_;
         emit RouterUpdated(router_);
     }
 
-    /**
-     * @notice Update the USDC/WBNB oracle pair.
-     *         Provide the USDC token address; isToken0 is derived on-chain.
-     *         Resets TWAP state — call updateTWAP() before the next token launch.
-     */
-    function setUsdcPair(address usdc_, address pair_, uint8 decimals_) external onlyOwner {
-        require(usdc_ != address(0), "Zero USDC");
-        require(pair_ != address(0), "Zero pair");
-        require(decimals_ == 6 || decimals_ == 18, "Unsupported decimals");
-
-        bool isToken0 = IPancakeV2Pair(pair_).token0() == usdc_;
-
-        usdcToken    = usdc_;
-        usdcWbnbPair = pair_;
-        usdcIsToken0 = isToken0;
-        usdcDecimals = decimals_;
-
-        // Reset TWAP state — force a fresh updateTWAP() before use
-        (,, uint32 ts) = IPancakeV2Pair(pair_).getReserves();
-        priceCumulativeLast = isToken0
-            ? IPancakeV2Pair(pair_).price0CumulativeLast()
-            : IPancakeV2Pair(pair_).price1CumulativeLast();
-        twapTimestampLast    = ts;
-        twapPriceAvg         = 0;
-        twapLastSuccessBlock = 0;
-
-        emit UsdcPairUpdated(usdc_, pair_, isToken0);
-    }
-
-    /**
-     * @notice Set the maximum age of the TWAP observation in blocks.
-     *         Default: 1 440 (~2 h on BSC).  Min: 60 (~5 min).
-     */
-    function setTwapMaxAgeBlocks(uint256 blocks_) external onlyOwner {
-        require(blocks_ >= 60, "Max age too small");
-        twapMaxAgeBlocks = blocks_;
-        emit TwapMaxAgeBlocksUpdated(blocks_);
-    }
-
+    /// @notice Propose a new owner.  The candidate must call acceptOwnership() to confirm.
     function transferOwnership(address newOwner_) external onlyOwner {
-        require(newOwner_ != address(0), "Zero address");
-        owner = newOwner_;
+        if (newOwner_ == address(0)) revert ZeroAddress();
+        pendingOwner = newOwner_;
+        emit OwnershipTransferProposed(owner, newOwner_);
     }
 
-    function withdrawFees() external onlyOwner {
-        uint256 amount = accumulatedFees;
-        require(amount > 0, "Nothing to withdraw");
-        accumulatedFees = 0;
-        (bool ok,) = payable(feeRecipient).call{value: amount}("");
-        require(ok, "BNB transfer failed");
-        emit FeesWithdrawn(feeRecipient, amount);
+    /// @notice Accept a pending ownership transfer.  Must be called by pendingOwner.
+    function acceptOwnership() external {
+        if (msg.sender != pendingOwner) revert NotPendingOwner();
+        emit OwnershipTransferred(owner, msg.sender);
+        owner        = msg.sender;
+        pendingOwner = address(0);
+    }
+
+    /// @notice Add an address as a manager.  Managers may update creationFee and default params.
+    function addManager(address manager_) external onlyOwner {
+        if (manager_ == address(0)) revert ZeroAddress();
+        managers[manager_] = true;
+        emit ManagerAdded(manager_);
+    }
+
+    /// @notice Remove a manager.
+    function removeManager(address manager_) external onlyOwner {
+        managers[manager_] = false;
+        emit ManagerRemoved(manager_);
+    }
+
+    /**
+     * @notice Set the charity wallet address.
+     *         The `charityFee` bps portion of each fee is routed here.
+     *         Set to address(0) to redirect the charity portion to feeRecipient.
+     */
+    function setCharityWallet(address wallet_) external onlyOwner {
+        charityWallet = wallet_;
+        emit CharityWalletUpdated(wallet_);
+    }
+
+    /// @notice Sweep any BNB not accounted for by active bonding-curve pools to feeRecipient.
+    function rescueBNB() external onlyOwner {
+        if (address(this).balance <= _totalRaisedBNB) revert ZeroAmount();
+        uint256 stray = address(this).balance - _totalRaisedBNB;
+        _safeSendBNB(feeRecipient, stray);
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // VIEW / PRICE HELPERS
+    // VIEW FUNCTIONS
     // ─────────────────────────────────────────────────────────────────────
 
     /**
      * @notice Tokens received for a given BNB input (after trade fee).
-     *         Accounts for the migration cap: if bnbIn would cross the target,
+     *         Accounts for the migration cap — if bnbIn crosses the target,
      *         the full remaining pool is returned.
      * @return tokensOut  Token amount the buyer would receive
      * @return feeBNB     Platform fee deducted from bnbIn
@@ -958,16 +824,17 @@ contract LaunchpadFactory {
 
         uint256 poolBNB    = tc.virtualBNB + tc.raisedBNB;
         uint256 poolTokens = tc.bcTokensTotal - tc.bcTokensSold;
+        uint256 totalFee   = platformFee + charityFee;
         uint256 bnbNeeded  = tc.migrationTarget - tc.raisedBNB;
-        uint256 grossNeeded = tradeFee == 0
+        uint256 grossNeeded = totalFee == 0
             ? bnbNeeded
-            : (bnbNeeded * BPS_DENOM + (BPS_DENOM - tradeFee) - 1) / (BPS_DENOM - tradeFee);
+            : (bnbNeeded * BPS_DENOM + (BPS_DENOM - totalFee) - 1) / (BPS_DENOM - totalFee);
 
         if (bnbIn >= grossNeeded) {
-            feeBNB    = (grossNeeded * tradeFee) / BPS_DENOM;
+            feeBNB    = (grossNeeded * totalFee) / BPS_DENOM;
             tokensOut = poolTokens;
         } else {
-            feeBNB    = (bnbIn * tradeFee) / BPS_DENOM;
+            feeBNB    = (bnbIn * totalFee) / BPS_DENOM;
             uint256 netBNB = bnbIn - feeBNB;
             tokensOut = poolTokens - (tc.k / (poolBNB + netBNB));
             if (tokensOut > poolTokens) tokensOut = poolTokens;
@@ -990,7 +857,7 @@ contract LaunchpadFactory {
         uint256 newPoolToks = poolToks + tokensIn;
         uint256 grossBNB    = poolBNB - (tc.k / newPoolToks);
         if (grossBNB > tc.raisedBNB) return (0, 0);
-        feeBNB = (grossBNB * tradeFee) / BPS_DENOM;
+        feeBNB = (grossBNB * (platformFee + charityFee)) / BPS_DENOM;
         bnbOut = grossBNB - feeBNB;
     }
 
@@ -999,7 +866,7 @@ contract LaunchpadFactory {
      */
     function getSpotPrice(address token_) external view returns (uint256 price) {
         TokenConfig storage tc = tokens[token_];
-        require(tc.token != address(0), "Unknown token");
+        if (tc.token == address(0)) revert UnknownToken();
         uint256 poolBNB    = tc.virtualBNB + tc.raisedBNB;
         uint256 poolTokens = tc.bcTokensTotal - tc.bcTokensSold;
         if (poolTokens == 0) return type(uint256).max;
@@ -1007,14 +874,12 @@ contract LaunchpadFactory {
     }
 
     /**
-     * @notice Predict the CREATE2 address that would result from calling
-     *         createToken / createTT / createRFL with the given parameters.
-     *         Use this off-chain to mine a userSalt whose resulting address
-     *         ends in 0x1111.
+     * @notice Predict the CREATE2 address for a given creator, salt, and implementation.
+     *         Use off-chain to mine a salt whose resulting address ends in 0x1111.
      *
-     * @param creator_   Address that will call the create function (msg.sender)
-     * @param userSalt_  The salt value that will be passed in BaseParams.salt
-     * @param impl_      Implementation address: standardImpl / taxImpl / reflectionImpl
+     * @param creator_   Address that will call the create function
+     * @param userSalt_  Salt value passed in BaseParams.salt
+     * @param impl_      Implementation: standardImpl / taxImpl / reflectionImpl
      */
     function predictTokenAddress(address creator_, bytes32 userSalt_, address impl_)
         external view
@@ -1037,25 +902,46 @@ contract LaunchpadFactory {
         )))));
     }
 
-    /// @notice Current creation fee denominated in BNB (refreshed from TWAP).
-    function creationFeeBNB() external view returns (uint256) {
-        return usdToBNB(creationFeeUSD);
-    }
-
-    /// @notice Total tokens launched across all creators.
-    function totalTokensLaunched() external view returns (uint256) { return allTokens.length; }
+    // ─────────────────────────────────────────────────────────────────────
+    // FEE DISPATCH
+    // ─────────────────────────────────────────────────────────────────────
 
     /**
-     * @notice All token addresses created by a given creator, in launch order.
-     * @param creator_ Creator wallet address
+     * @dev Route `amount` to charityWallet and feeRecipient in proportion to their
+     *      respective fee settings.  If charityWallet is unset or charityFee is 0,
+     *      the full amount goes to feeRecipient.
+     *      Fees are sent immediately — nothing is held in the factory.
      */
+    function _dispatchFee(uint256 amount) private {
+        if (amount == 0) return;
+        uint256 cFee    = charityFee;
+        uint256 total   = cFee + platformFee;
+        address charity = charityWallet;
+        if (charity != address(0) && cFee > 0 && total > 0) {
+            uint256 charityAmt = amount * cFee / total;
+            _safeSendBNB(charity,      charityAmt);
+            _safeSendBNB(feeRecipient, amount - charityAmt);
+        } else {
+            _safeSendBNB(feeRecipient, amount);
+        }
+    }
+
+    function _safeSendBNB(address to, uint256 amount) private {
+        if (amount == 0) return;
+        (bool ok,) = payable(to).call{value: amount}("");
+        if (!ok) revert BNBTransferFailed();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // VIEW FUNCTIONS
+    // ─────────────────────────────────────────────────────────────────────
+
+    function totalTokensLaunched() external view returns (uint256) { return allTokens.length; }
+
     function getTokensByCreator(address creator_) external view returns (address[] memory) {
         return _tokensByCreator[creator_];
     }
 
-    /**
-     * @notice Number of tokens launched by a given creator.
-     */
     function tokenCountByCreator(address creator_) external view returns (uint256) {
         return _tokensByCreator[creator_].length;
     }

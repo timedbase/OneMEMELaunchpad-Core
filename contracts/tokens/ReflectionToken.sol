@@ -14,6 +14,15 @@ interface IPancakeRouter02RFL {
         uint amountIn, uint amountOutMin, address[] calldata path,
         address to, uint deadline
     ) external;
+    function swapExactTokensForTokensSupportingFeeOnTransferTokens(
+        uint amountIn, uint amountOutMin, address[] calldata path,
+        address to, uint deadline
+    ) external;
+}
+
+interface IERC20Minimal {
+    function balanceOf(address account) external view returns (uint256);
+    function transfer(address to, uint256 amount) external returns (bool);
 }
 
 interface IPancakeFactoryRFL {
@@ -23,21 +32,32 @@ interface IPancakeFactoryRFL {
 
 /**
  * @title ReflectionToken  (OneMEME Launchpad)
- * @notice ERC-20 with RFI-style reflection rewards distributed passively to
- *         all non-excluded holders.
- *         Deployed as a minimal-proxy clone by LaunchpadFactory.
+ * @notice ERC-20 with RFI-style passive reflection and optional custom reflection
+ *         token.  Deployed as a minimal-proxy clone by LaunchpadFactory.
  *
- * Lifecycle (same as TaxToken):
- *   1. initForLaunchpad() – mints entire supply to factory (excluded from
- *      reflection), bonding-curve phase active.
- *   2. Factory transfers tokens to buyers; no reflection or fees during BC
- *      phase (factory excluded from fee).
- *   3. enableTrading(pair, router) – pair set, bonding phase off, DEX trading
- *      with full reflection & tax logic begins.
+ * Lifecycle:
+ *   1. initForLaunchpad() — mints entire supply to factory (excluded from
+ *      reflection), bonding-curve phase active.  All taxes start at 0 %;
+ *      the token owner must call setBuyTaxes / setSellTaxes to enable them.
+ *   2. Factory transfers tokens to buyers; no fees during BC phase.
+ *   3. postMigrateSetup(pair, router) — pair set, bonding phase off, full
+ *      reflection & tax logic begins.
+ *
+ * Reflection distribution:
+ *   - Native mode  (reflectionToken == address(0)): RFI-style, every non-excluded
+ *     holder's balance passively increases as _rTotal is reduced.
+ *   - Custom mode  (reflectionToken != address(0)): reflection tax is accumulated
+ *     and swapped to the set token, then pushed proportionally to all holders
+ *     whose balance meets the minimum threshold (default 0.1 % of total supply;
+ *     owner may raise this but never lower it below 0.1 %).
+ *
+ * Vesting:
+ *   - Creator tokens (5 % allocation) are held in address(this) as self-escrow.
+ *   - _vestingBalance tracks this portion separately from accumulated taxes so
+ *     swapAndDistribute never consumes unvested tokens.
  */
 contract ReflectionToken is ILaunchpadToken {
 
-    // ─── errors ────────────────────────────────────────────────────────
     error NotOwner();
     error NotFactory();
     error AlreadyInitialized();
@@ -47,35 +67,40 @@ contract ReflectionToken is ILaunchpadToken {
     error ExceedsAllowance();
     error AlreadyExcluded();
     error NotExcluded();
+    error DexAlreadyConfigured();
+    error CannotReflectSelf();
+    error CannotRescueOwnToken();
+    error VestingAlreadySet();
+    error NoVesting();
+    error NothingToClaim();
+    error InsufficientBalance();
     error BNBTransferFailed();
+    error BelowMinReflectionThreshold();
+    error SwapThresholdTooLow();
 
-    // ─── ownership / init ───────────────────────────────────────────────
     address private _owner;
     address private _factory;
     bool    private _initialized;
     bool    private _inBondingPhase;
 
-    // ─── ERC-20 metadata ────────────────────────────────────────────────
     string  private _name;
     string  private _symbol;
     string  private _metaURI;
     uint8   private constant DECIMALS = 18;
 
-    // ─── reflection accounting ──────────────────────────────────────────
-    uint256 private _tTotal;   // token-space supply
-    uint256 private _rTotal;   // reflection-space supply
+    uint256 private _tTotal;
+    uint256 private _rTotal;
     uint256 private constant MAX_UINT = ~uint256(0);
 
-    mapping(address => uint256) private _rOwned; // reflection balance
-    mapping(address => uint256) private _tOwned; // token balance (excluded only)
+    mapping(address => uint256) private _rOwned;
+    mapping(address => uint256) private _tOwned;
     mapping(address => mapping(address => uint256)) private _allowances;
     mapping(address => bool)    private _isExcludedFromFee;
     mapping(address => bool)    private _isExcludedFromReflection;
-    address[]                   private _excluded; // reflection-excluded list
+    address[]                   private _excluded;
 
-    uint256 private _tFeeTotal; // cumulative reflection distributed
+    uint256 private _tFeeTotal;
 
-    // ─── tax config ─────────────────────────────────────────────────────
     uint256 public buyMarketingTax;
     uint256 public buyTeamTax;
     uint256 public buyLiquidityTax;
@@ -90,27 +115,49 @@ contract ReflectionToken is ILaunchpadToken {
 
     uint256 public constant MAX_TOTAL_TAX = 1000; // 10 %
 
+    // 0.1 % of total supply — minimum holder balance to qualify for custom reflection.
+    // Owner can set reflectionMinBalance higher but never lower.
+    uint256 private constant MIN_REFLECTION_BPS     = 10;  // 0.1 %
+    // 0.05 % of total supply — floor for swapThreshold; prevents zero-amount swap DoS.
+    uint256 private constant MIN_SWAP_THRESHOLD_BPS = 2;   // 0.02 %
+    uint256 private constant BPS_DENOM              = 10000;
+
     uint256 public swapThreshold;
 
     address public marketingWallet;
     address public teamWallet;
     address public constant BURN_ADDRESS = 0x000000000000000000000000000000000000dEaD;
 
-    // ─── DEX state ──────────────────────────────────────────────────────
     IPancakeRouter02RFL public pancakeRouter;
     address             public pancakePair;
 
     bool private inSwap;
     bool public  swapEnabled;
 
-    // ─── Creator vesting (token contract is its own escrow) ───────────────
+    /// @notice address(0) = native RFI mode (default).
+    ///         When set, the reflection-tax portion is swapped to this token
+    ///         then pushed proportionally to all qualifying holders.
+    address public reflectionToken;
+
+    /// @notice Minimum token balance required to receive custom reflection.
+    ///         Initialised to 0.1 % of total supply; owner may only raise it.
+    uint256 public reflectionMinBalance;
+
+    address[] private _holders;
+    mapping(address => uint256) private _holderIndex; // 1-based index; 0 = not in list
+
+    uint256 private _toSwapForReflection;
+
     address public vestingCreator;
     uint256 public vestingTotal;
     uint256 public vestingStart;
     uint256 public vestingClaimed;
     uint256 private constant VESTING_DURATION = 365 days;
 
-    // ─── events ─────────────────────────────────────────────────────────
+    // Tracks the vesting escrow portion held in address(this).
+    // Excluded from swapAndDistribute so tax swaps never consume vested tokens.
+    uint256 private _vestingBalance;
+
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
     event OwnershipTransferred(address indexed prev, address indexed next);
@@ -120,14 +167,20 @@ contract ReflectionToken is ILaunchpadToken {
     event SwapAndLiquify(uint256 tokensSwapped, uint256 bnb);
     event ExcludedFromReflection(address indexed account);
     event IncludedInReflection(address indexed account);
-    event TradingEnabled(address pair, address router);
+    event DexConfigured(address pair, address router);
     event MetaURIUpdated(string uri);
+    event ReflectionTokenSet(address indexed token);
+    event ReflectionMinBalanceSet(uint256 minBalance);
+    event CustomReflectionDistributed(uint256 tokensSold, uint256 rewardDistributed, uint256 recipients);
     event VestingSetup(address indexed creator, uint256 amount);
-    event VestingClaimed(address indexed creator, uint256 amount);
+    event VestingClaimed(address indexed owner, uint256 amount);
 
     modifier lockSwap()   { inSwap = true; _; inSwap = false; }
     modifier onlyOwner()  { if (msg.sender != _owner)   revert NotOwner();   _; }
     modifier onlyFactory(){ if (msg.sender != _factory) revert NotFactory(); _; }
+
+    /// @dev Prevents direct initialization of the implementation contract.
+    constructor() { _initialized = true; }
 
     // ─────────────────────────────────────────────────────────────────────
     // INIT
@@ -135,9 +188,11 @@ contract ReflectionToken is ILaunchpadToken {
 
     /**
      * @notice One-shot initialiser called by the factory.
-     * @param wallets_      [marketing, team]
-     * @param buyTaxes_     [marketing, team, liquidity, burn, reflection] bps
-     * @param sellTaxes_    [marketing, team, liquidity, burn, reflection] bps
+     *         All taxes start at 0 % — the token owner must configure them
+     *         post-deployment via setBuyTaxes / setSellTaxes.
+     * @param wallets_       [marketing, team]
+     * @param swapThreshold_ Min contract token balance before swapAndDistribute
+     * @param router_        PancakeSwap V2 router — stored and used to create the pair immediately
      */
     function initForLaunchpad(
         string    calldata name_,
@@ -145,15 +200,15 @@ contract ReflectionToken is ILaunchpadToken {
         uint256            totalSupply_,
         address            factory_,
         address[2] calldata wallets_,
-        uint256[5] calldata buyTaxes_,
-        uint256[5] calldata sellTaxes_,
         uint256            swapThreshold_,
         address            tokenOwner_,
-        string    calldata metaURI_
+        string    calldata metaURI_,
+        address            router_
     ) external {
         if (_initialized) revert AlreadyInitialized();
         if (factory_    == address(0)) revert ZeroAddress();
         if (tokenOwner_ == address(0)) revert ZeroAddress();
+        if (router_     == address(0)) revert ZeroAddress();
         if (wallets_[0] == address(0) || wallets_[1] == address(0)) revert ZeroAddress();
 
         _initialized    = true;
@@ -169,20 +224,16 @@ contract ReflectionToken is ILaunchpadToken {
         marketingWallet = wallets_[0];
         teamWallet      = wallets_[1];
 
-        buyMarketingTax  = buyTaxes_[0]; buyTeamTax       = buyTaxes_[1];
-        buyLiquidityTax  = buyTaxes_[2]; buyBurnTax       = buyTaxes_[3];
-        buyReflectionTax = buyTaxes_[4];
-        if (_sumBuy() > MAX_TOTAL_TAX) revert ExceedsMax();
-
-        sellMarketingTax  = sellTaxes_[0]; sellTeamTax       = sellTaxes_[1];
-        sellLiquidityTax  = sellTaxes_[2]; sellBurnTax       = sellTaxes_[3];
-        sellReflectionTax = sellTaxes_[4];
-        if (_sumSell() > MAX_TOTAL_TAX) revert ExceedsMax();
-
+        if (swapThreshold_ < totalSupply_ * MIN_SWAP_THRESHOLD_BPS / BPS_DENOM) revert SwapThresholdTooLow();
         swapThreshold = swapThreshold_;
         swapEnabled   = false;
 
-        // Fee exclusions
+        // All taxes start at 0 % — configured post-deployment by the owner.
+        // (buyMarketingTax, buyTeamTax, ..., sellReflectionTax are all default 0.)
+
+        // Default reflection minimum: 0.1 % of total supply.
+        reflectionMinBalance = (_tTotal * MIN_REFLECTION_BPS) / BPS_DENOM;
+
         _isExcludedFromFee[factory_]      = true;
         _isExcludedFromFee[tokenOwner_]   = true;
         _isExcludedFromFee[address(this)] = true;
@@ -190,13 +241,20 @@ contract ReflectionToken is ILaunchpadToken {
         _isExcludedFromFee[wallets_[1]]   = true;
         _isExcludedFromFee[BURN_ADDRESS]  = true;
 
-        // Reflection exclusions (factory holds all tokens — must use _tOwned)
+        // Reflection exclusions — factory holds all tokens and must use _tOwned.
         _rOwned[factory_] = _rTotal;
         _excludeFromReflectionInternal(factory_);
         _excludeFromReflectionInternal(address(this));
         _excludeFromReflectionInternal(BURN_ADDRESS);
 
         _metaURI = metaURI_;
+
+        // Store router and create the PancakeSwap pair immediately.
+        // Liquidity is added only at migration; during bonding phase the pair holds nothing.
+        pancakeRouter = IPancakeRouter02RFL(router_);
+        pancakePair   = IPancakeFactoryRFL(pancakeRouter.factory()).createPair(address(this), pancakeRouter.WETH());
+        _isExcludedFromFee[pancakePair] = true;
+        _excludeFromReflectionInternal(pancakePair);
 
         emit Transfer(address(0), factory_, _tTotal);
         emit OwnershipTransferred(address(0), tokenOwner_);
@@ -206,35 +264,23 @@ contract ReflectionToken is ILaunchpadToken {
     // METADATA URI
     // ─────────────────────────────────────────────────────────────────────
 
-    /// @notice Off-chain metadata URI — JSON with name, description, image, website, etc.
     function metaURI() external view override returns (string memory) { return _metaURI; }
 
-    /// @notice Update the metadata URI.  Callable only by the token owner.
     function setMetaURI(string calldata uri_) external override onlyOwner {
         _metaURI = uri_;
         emit MetaURIUpdated(uri_);
     }
 
     /**
-     * @notice Called by factory after DEX migration.
-     *         Sets pair, excludes it from reflection, enables trading.
+     * @notice Called by the factory after DEX liquidity has been seeded.
+     *         Router, pair, and all exclusions are set from initForLaunchpad;
+     *         this simply exits the bonding phase and enables normal behaviour.
      */
-    function enableTrading(address pair_, address router_) external override onlyFactory {
-        require(_inBondingPhase,       "Trading already enabled");
-        require(pair_   != address(0), "Zero pair");
-        require(router_ != address(0), "Zero router");
-
-        pancakeRouter   = IPancakeRouter02RFL(router_);
-        pancakePair     = pair_;
+    function postMigrateSetup() external onlyFactory {
+        if (!_inBondingPhase) revert DexAlreadyConfigured();
         _inBondingPhase = false;
         swapEnabled     = true;
-
-        _isExcludedFromFee[pair_] = true;
-        if (!_isExcludedFromReflection[pair_]) {
-            _excludeFromReflectionInternal(pair_);
-        }
-
-        emit TradingEnabled(pair_, router_);
+        emit DexConfigured(pancakePair, address(pancakeRouter));
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -325,8 +371,11 @@ contract ReflectionToken is ILaunchpadToken {
         bool takeFee = !(_isExcludedFromFee[from] || _isExcludedFromFee[to]);
 
         if (!_inBondingPhase && swapEnabled && takeFee && !inSwap && from != pancakePair) {
-            uint256 cb = balanceOf(address(this));
-            if (cb >= swapThreshold) swapAndDistribute(cb);
+            uint256 rawBalance = balanceOf(address(this));
+            uint256 taxBalance = rawBalance > _vestingBalance
+                ? rawBalance - _vestingBalance
+                : 0;
+            if (taxBalance > 0 && taxBalance >= swapThreshold) swapAndDistribute(taxBalance);
         }
 
         _tokenTransfer(from, to, amount, takeFee);
@@ -334,13 +383,13 @@ contract ReflectionToken is ILaunchpadToken {
 
     function _calcFees(uint256 tAmount, bool isBuy, bool isSell) private view returns (FeeValues memory f) {
         if (isBuy) {
-            f.tReflection  = (tAmount * buyReflectionTax) / 10000;
-            f.tBurn        = (tAmount * buyBurnTax)       / 10000;
-            f.tToContract  = (tAmount * (buyMarketingTax + buyTeamTax + buyLiquidityTax)) / 10000;
+            f.tReflection  = (tAmount * buyReflectionTax) / BPS_DENOM;
+            f.tBurn        = (tAmount * buyBurnTax)       / BPS_DENOM;
+            f.tToContract  = (tAmount * (buyMarketingTax + buyTeamTax + buyLiquidityTax)) / BPS_DENOM;
         } else if (isSell) {
-            f.tReflection  = (tAmount * sellReflectionTax) / 10000;
-            f.tBurn        = (tAmount * sellBurnTax)        / 10000;
-            f.tToContract  = (tAmount * (sellMarketingTax + sellTeamTax + sellLiquidityTax)) / 10000;
+            f.tReflection  = (tAmount * sellReflectionTax) / BPS_DENOM;
+            f.tBurn        = (tAmount * sellBurnTax)        / BPS_DENOM;
+            f.tToContract  = (tAmount * (sellMarketingTax + sellTeamTax + sellLiquidityTax)) / BPS_DENOM;
         }
         f.tTotal = f.tReflection + f.tBurn + f.tToContract;
     }
@@ -354,22 +403,32 @@ contract ReflectionToken is ILaunchpadToken {
         uint256 rAmount         = tAmount * currentRate;
         uint256 rTransferAmount = rAmount - (f.tTotal * currentRate);
 
-        // Sender update
         if (_isExcludedFromReflection[sender]) { _tOwned[sender] -= tAmount; }
         _rOwned[sender] -= rAmount;
 
-        // Recipient update
         if (_isExcludedFromReflection[recipient]) { _tOwned[recipient] += tTransferAmount; }
         _rOwned[recipient] += rTransferAmount;
 
         emit Transfer(sender, recipient, tTransferAmount);
         _processFees(sender, f, currentRate);
+
+        _updateHolderList(sender);
+        _updateHolderList(recipient);
     }
 
     function _processFees(address sender, FeeValues memory f, uint256 rate) private {
         if (f.tReflection > 0) {
-            _rTotal    -= f.tReflection * rate;
-            _tFeeTotal += f.tReflection;
+            if (reflectionToken == address(0)) {
+                // Native RFI: passively increase all holders' balances by reducing _rTotal.
+                _rTotal    -= f.tReflection * rate;
+                _tFeeTotal += f.tReflection;
+            } else {
+                // Custom token: accumulate here for swap → push distribution.
+                _rOwned[address(this)] += f.tReflection * rate;
+                _tOwned[address(this)] += f.tReflection;
+                _toSwapForReflection   += f.tReflection;
+                emit Transfer(sender, address(this), f.tReflection);
+            }
         }
         if (f.tBurn > 0) {
             uint256 rBurn = f.tBurn * rate;
@@ -390,10 +449,23 @@ contract ReflectionToken is ILaunchpadToken {
     // ─────────────────────────────────────────────────────────────────────
 
     function swapAndDistribute(uint256 tokenAmount) private lockSwap {
+        uint256 reflAmount = _toSwapForReflection;
+        if (reflAmount > 0 && reflectionToken != address(0)) {
+            _toSwapForReflection = 0;
+            uint256 before = IERC20Minimal(reflectionToken).balanceOf(address(this));
+            _swapForReflectionToken(reflAmount);
+            uint256 received = IERC20Minimal(reflectionToken).balanceOf(address(this)) - before;
+            if (received > 0) {
+                uint256 n = _distributeReflection(received);
+                emit CustomReflectionDistributed(reflAmount, received, n);
+            }
+            tokenAmount -= reflAmount;
+        }
+
         uint256 totalBuy  = buyMarketingTax  + buyTeamTax  + buyLiquidityTax;
         uint256 totalSell = sellMarketingTax + sellTeamTax + sellLiquidityTax;
         uint256 totalTax  = totalBuy + totalSell;
-        if (totalTax == 0) return;
+        if (tokenAmount == 0 || totalTax == 0) return;
 
         uint256 lpTokens = (tokenAmount * (buyLiquidityTax + sellLiquidityTax)) / totalTax;
         uint256 halfLP   = lpTokens / 2;
@@ -426,6 +498,78 @@ contract ReflectionToken is ILaunchpadToken {
         pancakeRouter.swapExactTokensForETHSupportingFeeOnTransferTokens(
             tokenAmount, 0, path, address(this), block.timestamp
         );
+    }
+
+    /// @dev Swaps this-token → WBNB → reflectionToken (single-hop if reflectionToken == WBNB).
+    function _swapForReflectionToken(uint256 tokenAmount) private {
+        address weth = pancakeRouter.WETH();
+        address[] memory path;
+        if (reflectionToken == weth) {
+            path = new address[](2);
+            path[0] = address(this);
+            path[1] = weth;
+        } else {
+            path = new address[](3);
+            path[0] = address(this);
+            path[1] = weth;
+            path[2] = reflectionToken;
+        }
+        _approve(address(this), address(pancakeRouter), tokenAmount);
+        pancakeRouter.swapExactTokensForTokensSupportingFeeOnTransferTokens(
+            tokenAmount, 0, path, address(this), block.timestamp
+        );
+    }
+
+    /// @dev Add/remove addr from holder list based on balance.
+    ///      Addresses excluded from reflection are never tracked.
+    function _updateHolderList(address addr) private {
+        if (addr == address(0) || _isExcludedFromReflection[addr]) return;
+        uint256 bal = balanceOf(addr);
+        if (bal > 0) {
+            if (_holderIndex[addr] == 0) {
+                _holders.push(addr);
+                _holderIndex[addr] = _holders.length; // 1-based
+            }
+        } else {
+            uint256 idx = _holderIndex[addr];
+            if (idx != 0) {
+                uint256 last = _holders.length - 1;
+                address lastHolder = _holders[last];
+                _holders[idx - 1] = lastHolder;
+                _holderIndex[lastHolder] = idx;
+                _holders.pop();
+                _holderIndex[addr] = 0;
+            }
+        }
+    }
+
+    /// @dev Push `amount` of reflectionToken proportionally to qualifying holders.
+    ///      Returns the number of recipients that received a share.
+    function _distributeReflection(uint256 amount) private returns (uint256 recipients) {
+        uint256 minBal = reflectionMinBalance;
+        uint256 len    = _holders.length;
+        if (len == 0) return 0;
+
+        uint256 eligibleSupply;
+        for (uint256 i; i < len; ) {
+            uint256 bal = balanceOf(_holders[i]);
+            if (bal >= minBal) eligibleSupply += bal;
+            unchecked { ++i; }
+        }
+        if (eligibleSupply == 0) return 0;
+
+        for (uint256 i; i < len; ) {
+            address holder = _holders[i];
+            uint256 bal = balanceOf(holder);
+            if (bal >= minBal) {
+                uint256 share = amount * bal / eligibleSupply;
+                if (share > 0) {
+                    IERC20Minimal(reflectionToken).transfer(holder, share);
+                    unchecked { ++recipients; }
+                }
+            }
+            unchecked { ++i; }
+        }
     }
 
     function _addLiquidity(uint256 tokenAmount, uint256 bnbAmount) private {
@@ -463,6 +607,16 @@ contract ReflectionToken is ILaunchpadToken {
     function excludeFromReflection(address account) external onlyOwner {
         if (_isExcludedFromReflection[account]) revert AlreadyExcluded();
         _excludeFromReflectionInternal(account);
+        // Also remove from _holders[] so it no longer receives custom reflection.
+        uint256 idx = _holderIndex[account];
+        if (idx != 0) {
+            uint256 last = _holders.length - 1;
+            address lastHolder = _holders[last];
+            _holders[idx - 1]        = lastHolder;
+            _holderIndex[lastHolder] = idx;
+            _holders.pop();
+            _holderIndex[account]    = 0;
+        }
     }
 
     function includeInReflection(address account) external onlyOwner {
@@ -485,6 +639,33 @@ contract ReflectionToken is ILaunchpadToken {
     // OWNER ADMIN
     // ─────────────────────────────────────────────────────────────────────
 
+    /**
+     * @notice Set a custom token to receive reflection rewards.
+     *         Pass address(0) to revert to native RFI mode.
+     *         Any unswapped accumulation for the previous token is discarded.
+     */
+    function setReflectionToken(address token_) external onlyOwner {
+        if (token_ == address(this)) revert CannotReflectSelf();
+        _toSwapForReflection = 0;
+        reflectionToken = token_;
+        emit ReflectionTokenSet(token_);
+    }
+
+    /**
+     * @notice Set the minimum token balance a holder must have to receive
+     *         custom reflection distributions.
+     *         Cannot be set below 0.1 % of total supply (dust protection).
+     */
+    function setReflectionMinBalance(uint256 minBalance_) external onlyOwner {
+        uint256 floor = (_tTotal * MIN_REFLECTION_BPS) / BPS_DENOM;
+        if (minBalance_ < floor) revert BelowMinReflectionThreshold();
+        reflectionMinBalance = minBalance_;
+        emit ReflectionMinBalanceSet(minBalance_);
+    }
+
+    /// @notice Number of addresses currently tracked in the holder list.
+    function holderCount() external view returns (uint256) { return _holders.length; }
+
     function setBuyTaxes(uint256 mkt, uint256 team, uint256 lp, uint256 burn, uint256 rfl) external onlyOwner {
         if (mkt + team + lp + burn + rfl > MAX_TOTAL_TAX) revert ExceedsMax();
         buyMarketingTax = mkt; buyTeamTax = team; buyLiquidityTax = lp;
@@ -505,7 +686,10 @@ contract ReflectionToken is ILaunchpadToken {
         emit WalletsUpdated(mkt, team);
     }
 
-    function setSwapThreshold(uint256 amount)  external onlyOwner { swapThreshold = amount;  }
+    function setSwapThreshold(uint256 amount) external onlyOwner {
+        if (amount < _tTotal * MIN_SWAP_THRESHOLD_BPS / BPS_DENOM) revert SwapThresholdTooLow();
+        swapThreshold = amount;
+    }
     function setSwapEnabled(bool enabled)       external onlyOwner { swapEnabled   = enabled; }
     function excludeFromFee(address a, bool ex) external onlyOwner { _isExcludedFromFee[a] = ex; }
 
@@ -521,9 +705,12 @@ contract ReflectionToken is ILaunchpadToken {
     }
 
     function manualSwap() external onlyOwner {
-        uint256 cb = balanceOf(address(this));
-        if (cb == 0) revert ZeroAmount();
-        swapAndDistribute(cb);
+        uint256 rawBalance = balanceOf(address(this));
+        uint256 taxBalance = rawBalance > _vestingBalance
+            ? rawBalance - _vestingBalance
+            : 0;
+        if (taxBalance == 0) revert ZeroAmount();
+        swapAndDistribute(taxBalance);
     }
 
     function rescueBNB() external onlyOwner {
@@ -532,7 +719,7 @@ contract ReflectionToken is ILaunchpadToken {
     }
 
     function rescueTokens(address tokenAddr) external onlyOwner {
-        require(tokenAddr != address(this), "Cannot rescue own");
+        if (tokenAddr == address(this)) revert CannotRescueOwnToken();
         uint256 bal = ILaunchpadToken(tokenAddr).balanceOf(address(this));
         ILaunchpadToken(tokenAddr).transfer(_owner, bal);
     }
@@ -563,16 +750,17 @@ contract ReflectionToken is ILaunchpadToken {
 
     /**
      * @notice Called once by the factory after transferring creator tokens here.
-     *         address(this) is excluded from both fees and reflection, so the
-     *         tokens are held in _tOwned and transferred cleanly to the creator.
+     *         address(this) is excluded from both fees and reflection, so tokens
+     *         are held in _tOwned and transferred cleanly to the owner on claim.
      */
     function setupVesting(address creator_, uint256 amount_) external override onlyFactory {
-        require(vestingCreator == address(0), "Vesting already set");
-        require(creator_ != address(0),       "Zero creator");
-        require(amount_  > 0,                 "Zero amount");
-        vestingCreator = creator_;
-        vestingTotal   = amount_;
-        vestingStart   = block.timestamp;
+        if (vestingCreator != address(0)) revert VestingAlreadySet();
+        if (creator_ == address(0))       revert ZeroAddress();
+        if (amount_  == 0)                revert ZeroAmount();
+        vestingCreator  = creator_;
+        vestingTotal    = amount_;
+        vestingStart    = block.timestamp;
+        _vestingBalance = amount_;
         emit VestingSetup(creator_, amount_);
     }
 
@@ -580,21 +768,21 @@ contract ReflectionToken is ILaunchpadToken {
      * @notice Claim linearly vested tokens.  Callable only by the current token owner.
      *         If ownership is transferred, the new owner inherits vesting rights.
      *         vestingCreator records the original recipient for transparency only.
-     *         Transfer is fee-free (address(this) is excluded from fees).
      */
     function claimVesting() external {
-        require(msg.sender == _owner, "Not owner");
-        require(vestingTotal > 0,     "No vesting");
+        if (msg.sender != _owner) revert NotOwner();
+        if (vestingTotal == 0)    revert NoVesting();
         uint256 elapsed = block.timestamp - vestingStart;
         if (elapsed > VESTING_DURATION) elapsed = VESTING_DURATION;
         uint256 claimable = (vestingTotal * elapsed / VESTING_DURATION) - vestingClaimed;
-        require(claimable > 0, "Nothing to claim");
-        vestingClaimed += claimable;
+        if (claimable == 0) revert NothingToClaim();
+        vestingClaimed  += claimable;
+        _vestingBalance -= claimable;
         _transfer(address(this), _owner, claimable);
         emit VestingClaimed(_owner, claimable);
     }
 
-    /// @notice How many tokens the creator can claim right now.
+    /// @notice Tokens the current owner can claim right now.
     function claimableVesting() external view returns (uint256) {
         if (vestingTotal == 0) return 0;
         uint256 elapsed = block.timestamp - vestingStart;

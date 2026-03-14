@@ -31,7 +31,7 @@ interface IPancakeFactoryTT {
  *      tax params configured, bonding-curve phase active.
  *   2. During bonding-curve phase transfers from/to the factory are fee-free;
  *      swapAndDistribute is suppressed (no DEX pair yet).
- *   3. Factory calls enableTrading(pair, router) after DEX migration –
+ *   3. Factory calls postMigrateSetup(pair, router) after DEX migration –
  *      pancakePair & router set, bonding phase disabled, normal fees begin.
  */
 contract TaxToken is ILaunchpadToken {
@@ -41,23 +41,30 @@ contract TaxToken is ILaunchpadToken {
     error NotFactory();
     error AlreadyInitialized();
     error ZeroAddress();
+    error ZeroAmount();
     error TaxExceedsMax();
+    error SwapThresholdTooLow();
+    error DexAlreadyConfigured();
+    error ExceedsAllowance();
+    error InsufficientBalance();
+    error NothingToSwap();
+    error CannotRescueOwnToken();
+    error VestingAlreadySet();
+    error NoVesting();
+    error NothingToClaim();
     error BNBTransferFailed();
 
-    // ─── ownership / init ───────────────────────────────────────────────
     address private _owner;
     address private _factory;
     bool    private _initialized;
     bool    private _inBondingPhase;
 
-    // ─── ERC-20 metadata ────────────────────────────────────────────────
     string  private _name;
     string  private _symbol;
     string  private _metaURI;
     uint8   private constant DECIMALS = 18;
     uint256 private _totalSupply;
 
-    // ─── tax config ─────────────────────────────────────────────────────
     uint256 public buyMarketingTax;
     uint256 public buyTeamTax;
     uint256 public buyTreasuryTax;
@@ -70,7 +77,9 @@ contract TaxToken is ILaunchpadToken {
     uint256 public sellBurnTax;
     uint256 public sellLiquidityTax;
 
-    uint256 public constant MAX_TOTAL_TAX = 1000; // 10 %
+    uint256 public constant MAX_TOTAL_TAX          = 1000; // 10 %
+    uint256 private constant MIN_SWAP_THRESHOLD_BPS = 2;    // 0.02 %
+    uint256 private constant BPS_DENOM              = 10000;
 
     uint256 public swapThreshold;
 
@@ -79,26 +88,26 @@ contract TaxToken is ILaunchpadToken {
     address public treasuryWallet;
     address public constant BURN_ADDRESS = 0x000000000000000000000000000000000000dEaD;
 
-    // ─── balances & allowances ──────────────────────────────────────────
     mapping(address => uint256)                     private _balances;
     mapping(address => mapping(address => uint256)) private _allowances;
     mapping(address => bool)                        private _isExcludedFromFee;
 
-    // ─── DEX state ──────────────────────────────────────────────────────
     IPancakeRouter02TT public pancakeRouter;
     address            public pancakePair;
 
     bool private inSwap;
     bool public  swapEnabled;
 
-    // ─── Creator vesting (token contract is its own escrow) ───────────────
     address public vestingCreator;
     uint256 public vestingTotal;
     uint256 public vestingStart;
     uint256 public vestingClaimed;
     uint256 private constant VESTING_DURATION = 365 days;
 
-    // ─── events ─────────────────────────────────────────────────────────
+    // Tracks the vesting escrow portion held inside this contract.
+    // Excluded from swapAndDistribute so tax swaps never consume vested tokens.
+    uint256 private _vestingBalance;
+
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
     event OwnershipTransferred(address indexed prev, address indexed next);
@@ -106,14 +115,17 @@ contract TaxToken is ILaunchpadToken {
     event BuyTaxesUpdated(uint256 marketing, uint256 team, uint256 treasury, uint256 burn, uint256 lp);
     event SellTaxesUpdated(uint256 marketing, uint256 team, uint256 treasury, uint256 burn, uint256 lp);
     event SwapAndLiquify(uint256 tokensSwapped, uint256 bnbReceived);
-    event TradingEnabled(address pair, address router);
+    event DexConfigured(address pair, address router);
     event MetaURIUpdated(string uri);
     event VestingSetup(address indexed creator, uint256 amount);
-    event VestingClaimed(address indexed creator, uint256 amount);
+    event VestingClaimed(address indexed owner, uint256 amount);
 
     modifier lockSwap()   { inSwap = true; _; inSwap = false; }
     modifier onlyOwner()  { if (msg.sender != _owner)   revert NotOwner();   _; }
     modifier onlyFactory(){ if (msg.sender != _factory) revert NotFactory(); _; }
+
+    /// @dev Prevents direct initialization of the implementation contract.
+    constructor() { _initialized = true; }
 
     // ─────────────────────────────────────────────────────────────────────
     // INIT
@@ -127,6 +139,7 @@ contract TaxToken is ILaunchpadToken {
      * @param sellTaxes_     [marketing, team, treasury, burn, liquidity] in bps
      * @param swapThreshold_ Min contract token balance before swapAndDistribute
      * @param tokenOwner_    Address that owns the token after migration
+     * @param router_        PancakeSwap V2 router — stored and used to create the pair immediately
      */
     function initForLaunchpad(
         string    calldata name_,
@@ -138,11 +151,13 @@ contract TaxToken is ILaunchpadToken {
         uint256[5] calldata sellTaxes_,
         uint256            swapThreshold_,
         address            tokenOwner_,
-        string    calldata metaURI_
+        string    calldata metaURI_,
+        address            router_
     ) external {
         if (_initialized) revert AlreadyInitialized();
         if (factory_    == address(0)) revert ZeroAddress();
         if (tokenOwner_ == address(0)) revert ZeroAddress();
+        if (router_     == address(0)) revert ZeroAddress();
         for (uint256 i; i < 3; ) { if (wallets_[i] == address(0)) revert ZeroAddress(); unchecked { ++i; } }
 
         _initialized    = true;
@@ -170,10 +185,10 @@ contract TaxToken is ILaunchpadToken {
         if (sellMarketingTax + sellTeamTax + sellTreasuryTax + sellBurnTax + sellLiquidityTax > MAX_TOTAL_TAX)
             revert TaxExceedsMax();
 
+        if (swapThreshold_ < totalSupply_ * MIN_SWAP_THRESHOLD_BPS / BPS_DENOM) revert SwapThresholdTooLow();
         swapThreshold = swapThreshold_;
-        swapEnabled   = false; // enabled after migration
+        swapEnabled   = false;
 
-        // Exclude key addresses from fees
         _isExcludedFromFee[factory_]       = true;
         _isExcludedFromFee[tokenOwner_]    = true;
         _isExcludedFromFee[address(this)]  = true;
@@ -184,7 +199,12 @@ contract TaxToken is ILaunchpadToken {
 
         _metaURI = metaURI_;
 
-        // Mint entire supply to factory
+        // Store router and create the PancakeSwap pair immediately.
+        // Liquidity is added only at migration; during bonding phase the pair holds nothing.
+        pancakeRouter = IPancakeRouter02TT(router_);
+        pancakePair   = IPancakeFactoryTT(pancakeRouter.factory()).createPair(address(this), pancakeRouter.WETH());
+        _isExcludedFromFee[pancakePair] = true;
+
         _balances[factory_] = totalSupply_;
         emit Transfer(address(0), factory_, totalSupply_);
         emit OwnershipTransferred(address(0), tokenOwner_);
@@ -204,23 +224,15 @@ contract TaxToken is ILaunchpadToken {
     }
 
     /**
-     * @notice Called by factory after DEX liquidity is seeded.
-     *         Unlocks normal tax behaviour on PancakeSwap pair.
+     * @notice Called by the factory after DEX liquidity has been seeded.
+     *         Router and pair are already set from initForLaunchpad; this simply
+     *         exits the bonding phase and enables normal tax/swap behaviour.
      */
-    function enableTrading(address pair_, address router_) external override onlyFactory {
-        require(_inBondingPhase,        "Trading already enabled");
-        require(pair_   != address(0),  "Zero pair");
-        require(router_ != address(0),  "Zero router");
-
-        pancakeRouter   = IPancakeRouter02TT(router_);
-        pancakePair     = pair_;
+    function postMigrateSetup() external onlyFactory {
+        if (!_inBondingPhase) revert DexAlreadyConfigured();
         _inBondingPhase = false;
         swapEnabled     = true;
-
-        // Exclude pair from fees
-        _isExcludedFromFee[pair_] = true;
-
-        emit TradingEnabled(pair_, router_);
+        emit DexConfigured(pancakePair, address(pancakeRouter));
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -250,7 +262,7 @@ contract TaxToken is ILaunchpadToken {
 
     function transferFrom(address from, address to, uint256 amount) public override returns (bool) {
         uint256 allowed = _allowances[from][msg.sender];
-        require(allowed >= amount, "Exceeds allowance");
+        if (allowed < amount) revert ExceedsAllowance();
         unchecked { _allowances[from][msg.sender] = allowed - amount; }
         _transfer(from, to, amount);
         return true;
@@ -261,15 +273,17 @@ contract TaxToken is ILaunchpadToken {
     // ─────────────────────────────────────────────────────────────────────
 
     function _transfer(address from, address to, uint256 amount) private {
-        require(from != address(0) && to != address(0), "Zero address");
-        require(amount > 0 && _balances[from] >= amount, "Invalid amount");
+        if (from == address(0) || to == address(0)) revert ZeroAddress();
+        if (amount == 0)                            revert ZeroAmount();
+        if (_balances[from] < amount)               revert InsufficientBalance();
 
         bool takeFee = !(_isExcludedFromFee[from] || _isExcludedFromFee[to]);
 
-        // Auto-swap only after bonding phase ends and pair exists
         if (!_inBondingPhase && swapEnabled && takeFee && !inSwap && from != pancakePair) {
-            uint256 cb = _balances[address(this)];
-            if (cb >= swapThreshold) swapAndDistribute(cb);
+            uint256 taxBalance = _balances[address(this)] > _vestingBalance
+                ? _balances[address(this)] - _vestingBalance
+                : 0;
+            if (taxBalance > 0 && taxBalance >= swapThreshold) swapAndDistribute(taxBalance);
         }
 
         _executeTransfer(from, to, amount, takeFee);
@@ -372,7 +386,7 @@ contract TaxToken is ILaunchpadToken {
     }
 
     function _approve(address owner_, address spender, uint256 amount) private {
-        require(owner_ != address(0) && spender != address(0), "Zero address");
+        if (owner_ == address(0) || spender == address(0)) revert ZeroAddress();
         _allowances[owner_][spender] = amount;
         emit Approval(owner_, spender, amount);
     }
@@ -401,7 +415,10 @@ contract TaxToken is ILaunchpadToken {
         emit WalletsUpdated(mkt, team, tsy);
     }
 
-    function setSwapThreshold(uint256 amount)  external onlyOwner { swapThreshold = amount;  }
+    function setSwapThreshold(uint256 amount) external onlyOwner {
+        if (amount < _totalSupply * MIN_SWAP_THRESHOLD_BPS / BPS_DENOM) revert SwapThresholdTooLow();
+        swapThreshold = amount;
+    }
     function setSwapEnabled(bool enabled)       external onlyOwner { swapEnabled   = enabled; }
     function excludeFromFee(address a, bool ex) external onlyOwner { _isExcludedFromFee[a] = ex; }
 
@@ -417,8 +434,11 @@ contract TaxToken is ILaunchpadToken {
     }
 
     function manualSwap() external onlyOwner {
-        require(_balances[address(this)] > 0, "Nothing to swap");
-        swapAndDistribute(_balances[address(this)]);
+        uint256 taxBalance = _balances[address(this)] > _vestingBalance
+            ? _balances[address(this)] - _vestingBalance
+            : 0;
+        if (taxBalance == 0) revert NothingToSwap();
+        swapAndDistribute(taxBalance);
     }
 
     function rescueBNB() external onlyOwner {
@@ -427,7 +447,7 @@ contract TaxToken is ILaunchpadToken {
     }
 
     function rescueTokens(address tokenAddr) external onlyOwner {
-        require(tokenAddr != address(this), "Cannot rescue own");
+        if (tokenAddr == address(this)) revert CannotRescueOwnToken();
         uint256 bal = ILaunchpadToken(tokenAddr).balanceOf(address(this));
         ILaunchpadToken(tokenAddr).transfer(_owner, bal);
     }
@@ -454,12 +474,13 @@ contract TaxToken is ILaunchpadToken {
      *         Starts the 12-month linear vesting schedule.
      */
     function setupVesting(address creator_, uint256 amount_) external override onlyFactory {
-        require(vestingCreator == address(0), "Vesting already set");
-        require(creator_ != address(0),       "Zero creator");
-        require(amount_  > 0,                 "Zero amount");
-        vestingCreator = creator_;
-        vestingTotal   = amount_;
-        vestingStart   = block.timestamp;
+        if (vestingCreator != address(0)) revert VestingAlreadySet();
+        if (creator_ == address(0))       revert ZeroAddress();
+        if (amount_  == 0)                revert ZeroAmount();
+        vestingCreator   = creator_;
+        vestingTotal     = amount_;
+        vestingStart     = block.timestamp;
+        _vestingBalance  = amount_;
         emit VestingSetup(creator_, amount_);
     }
 
@@ -470,13 +491,14 @@ contract TaxToken is ILaunchpadToken {
      *         Transfer is fee-free (address(this) is excluded from fees).
      */
     function claimVesting() external {
-        require(msg.sender == _owner, "Not owner");
-        require(vestingTotal > 0,     "No vesting");
+        if (msg.sender != _owner) revert NotOwner();
+        if (vestingTotal == 0)    revert NoVesting();
         uint256 elapsed = block.timestamp - vestingStart;
         if (elapsed > VESTING_DURATION) elapsed = VESTING_DURATION;
         uint256 claimable = (vestingTotal * elapsed / VESTING_DURATION) - vestingClaimed;
-        require(claimable > 0, "Nothing to claim");
-        vestingClaimed += claimable;
+        if (claimable == 0) revert NothingToClaim();
+        vestingClaimed  += claimable;
+        _vestingBalance -= claimable;
         _transfer(address(this), _owner, claimable);
         emit VestingClaimed(_owner, claimable);
     }

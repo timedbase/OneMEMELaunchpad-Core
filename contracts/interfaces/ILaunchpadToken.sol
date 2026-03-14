@@ -4,11 +4,6 @@ pragma solidity ^0.8.32;
 /// @notice Minimal interface every launchpad token must implement so the factory
 ///         can manage the bonding-curve phase and trigger DEX migration.
 interface ILaunchpadToken {
-    /// @notice Called by the factory once trading has migrated to a DEX.
-    ///         Sets the PancakeSwap pair address and router, then opens normal
-    ///         fee/reflection logic.
-    function enableTrading(address pair_, address router_) external;
-
     /// @notice Called once by the factory (at token creation) to deposit the
     ///         creator's allocation into the token contract and start the 12-month
     ///         linear vesting schedule.  The factory must have already transferred
