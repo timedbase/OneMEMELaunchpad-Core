@@ -188,10 +188,9 @@ contract ReflectionToken is ILaunchpadToken {
 
     /**
      * @notice One-shot initialiser called by the factory.
-     *         All taxes start at 0 % — the token owner must configure them
-     *         post-deployment via setBuyTaxes / setSellTaxes.
-     * @param wallets_       [marketing, team]
-     * @param swapThreshold_ Min contract token balance before swapAndDistribute
+     *         Wallets default to tokenOwner_, swapThreshold defaults to 0.1 % of supply.
+     *         All taxes start at 0 % — configure post-deployment via setBuyTaxes / setSellTaxes.
+     * @param tokenOwner_    Address that owns the token after migration
      * @param router_        PancakeSwap V2 router — stored and used to create the pair immediately
      */
     function initForLaunchpad(

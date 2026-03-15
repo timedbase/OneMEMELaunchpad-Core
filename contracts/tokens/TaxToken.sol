@@ -134,10 +134,8 @@ contract TaxToken is ILaunchpadToken {
     /**
      * @notice One-shot initialiser called by the factory immediately after clone
      *         deployment.  All tokens minted to factory_.
-     * @param wallets_       [marketing, team, treasury]
-     * @param buyTaxes_      [marketing, team, treasury, burn, liquidity] in bps
-     * @param sellTaxes_     [marketing, team, treasury, burn, liquidity] in bps
-     * @param swapThreshold_ Min contract token balance before swapAndDistribute
+     *         Wallets default to tokenOwner_, all taxes start at 0 %,
+     *         swapThreshold defaults to 0.1 % of supply.
      * @param tokenOwner_    Address that owns the token after migration
      * @param router_        PancakeSwap V2 router — stored and used to create the pair immediately
      */
@@ -178,9 +176,6 @@ contract TaxToken is ILaunchpadToken {
         _isExcludedFromFee[factory_]       = true;
         _isExcludedFromFee[tokenOwner_]    = true;
         _isExcludedFromFee[address(this)]  = true;
-        _isExcludedFromFee[wallets_[0]]    = true;
-        _isExcludedFromFee[wallets_[1]]    = true;
-        _isExcludedFromFee[wallets_[2]]    = true;
         _isExcludedFromFee[BURN_ADDRESS]   = true;
 
         _metaURI = metaURI_;
