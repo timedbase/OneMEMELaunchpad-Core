@@ -362,7 +362,7 @@ contract LaunchpadFactory {
      *         msg.value must cover the creation fee in BNB.
      *         Any excess BNB is used as an immediate antibot-exempt buy.
      */
-    function createTT(CreateTTParams calldata p) external payable nonReentrant returns (address token) {
+    function createTT(CreateTTParams calldata p) external payable nonReentrant returns (address payable token) {
         uint256 earlyBuy = _collectCreationFee();
         token = _cloneCreate2(taxImpl, p.base.salt);
 
@@ -390,7 +390,7 @@ contract LaunchpadFactory {
      *         Taxes start at 0 % — the token owner must call setBuyTaxes /
      *         setSellTaxes post-deployment to enable reflection.
      */
-    function createRFL(CreateRFLParams calldata p) external payable nonReentrant returns (address token) {
+    function createRFL(CreateRFLParams calldata p) external payable nonReentrant returns (address payable token) {
         uint256 earlyBuy = _collectCreationFee();
         token = _cloneCreate2(reflectionImpl, p.base.salt);
 
