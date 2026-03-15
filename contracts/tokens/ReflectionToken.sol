@@ -199,8 +199,6 @@ contract ReflectionToken is ILaunchpadToken {
         string    calldata symbol_,
         uint256            totalSupply_,
         address            factory_,
-        address[2] calldata wallets_,
-        uint256            swapThreshold_,
         address            tokenOwner_,
         string    calldata metaURI_,
         address            router_
@@ -209,7 +207,6 @@ contract ReflectionToken is ILaunchpadToken {
         if (factory_    == address(0)) revert ZeroAddress();
         if (tokenOwner_ == address(0)) revert ZeroAddress();
         if (router_     == address(0)) revert ZeroAddress();
-        if (wallets_[0] == address(0) || wallets_[1] == address(0)) revert ZeroAddress();
 
         _initialized    = true;
         _inBondingPhase = true;
@@ -221,11 +218,12 @@ contract ReflectionToken is ILaunchpadToken {
         _tTotal = totalSupply_;
         _rTotal = MAX_UINT - (MAX_UINT % _tTotal);
 
-        marketingWallet = wallets_[0];
-        teamWallet      = wallets_[1];
+        // Wallets default to owner — updatable post-deployment via setWallets().
+        marketingWallet = tokenOwner_;
+        teamWallet      = tokenOwner_;
 
-        if (swapThreshold_ < totalSupply_ * MIN_SWAP_THRESHOLD_BPS / BPS_DENOM) revert SwapThresholdTooLow();
-        swapThreshold = swapThreshold_;
+        // swapThreshold defaults to 0.1 % of supply — updatable post-deployment via setSwapThreshold().
+        swapThreshold = totalSupply_ / 1000;
         swapEnabled   = false;
 
         // All taxes start at 0 % — configured post-deployment by the owner.
@@ -237,8 +235,6 @@ contract ReflectionToken is ILaunchpadToken {
         _isExcludedFromFee[factory_]      = true;
         _isExcludedFromFee[tokenOwner_]   = true;
         _isExcludedFromFee[address(this)] = true;
-        _isExcludedFromFee[wallets_[0]]   = true;
-        _isExcludedFromFee[wallets_[1]]   = true;
         _isExcludedFromFee[BURN_ADDRESS]  = true;
 
         // Reflection exclusions — factory holds all tokens and must use _tOwned.

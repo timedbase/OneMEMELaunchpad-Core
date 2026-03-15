@@ -39,8 +39,7 @@ interface IPostMigrate {
  *
  *   All values are stored and used in BNB wei.  They are locked into
  *   TokenConfig at creation time.  Subsequent owner/manager updates only
- *   affect future launches.  Creators may override virtualBNB and
- *   migrationTarget per-token via BaseParams.
+ *   affect future launches.
  *
  * ─── Supply options (18 decimals) ─────────────────────────────────────────
  *   ONE      =           1 × 10^18
@@ -91,6 +90,13 @@ contract LaunchpadFactory {
     enum TokenType    { STANDARD, TAX, REFLECTION }
     enum SupplyOption { ONE, THOUSAND, MILLION, BILLION }
 
+    struct Alloc {
+        uint256 supply;
+        uint256 liqTokens;
+        uint256 creatorTokens;
+        uint256 bcTokens;
+    }
+
     struct TokenConfig {
         address   token;
         TokenType tokenType;
@@ -124,8 +130,6 @@ contract LaunchpadFactory {
         bool         enableCreatorAlloc;
         bool         enableAntibot;
         uint256      antibotBlocks;         // 10 – 199; ignored if antibot disabled
-        uint256      customVirtualBNB;      // BNB wei; 0 → use factory default
-        uint256      customMigrationTarget; // BNB wei; 0 → use factory default
         /**
          * @notice Off-chain metadata URI (IPFS/HTTPS).
          *         JSON shape: { name, description, image, external_link }
@@ -141,19 +145,27 @@ contract LaunchpadFactory {
     }
 
     struct CreateTTParams {
-        BaseParams   base;
-        address[3]   wallets;    // marketing, team, treasury
-        uint256[5]   buyTaxes;   // marketing, team, treasury, burn, lp  (bps)
-        uint256[5]   sellTaxes;
-        uint256      swapThreshold;
+        string       name;
+        string       symbol;
+        string       metaURI;
+        SupplyOption supplyOption;
+        bool         enableCreatorAlloc;
+        bool         enableAntibot;
+        uint256      antibotBlocks;
+        bytes32      salt;
+        // wallets/taxes/swapThreshold default to owner/0/0.1% — configurable post-deployment on the token.
     }
 
     struct CreateRFLParams {
-        BaseParams   base;
-        address[2]   wallets;    // marketing, team
-        uint256      swapThreshold;
-        // Taxes are not set at creation — token owner must call setBuyTaxes /
-        // setSellTaxes post-deployment.  Default is 0 % for all components.
+        string       name;
+        string       symbol;
+        string       metaURI;
+        SupplyOption supplyOption;
+        bool         enableCreatorAlloc;
+        bool         enableAntibot;
+        uint256      antibotBlocks;
+        bytes32      salt;
+        // wallets/swapThreshold default to owner/0.1% — taxes configurable post-deployment on the token.
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -341,19 +353,18 @@ contract LaunchpadFactory {
      *         msg.value must cover the creation fee in BNB.
      *         Any excess BNB is used as an immediate antibot-exempt buy.
      */
-    function createToken(BaseParams calldata p) external payable nonReentrant returns (address token) {
+    function createToken(BaseParams memory p) external payable nonReentrant returns (address token) {
         uint256 earlyBuy = _collectCreationFee();
         token = _cloneCreate2(standardImpl, p.salt);
 
-        (uint256 supply, uint256 liqTokens, uint256 creatorTokens, uint256 bcTokens)
-            = _computeAlloc(_supplyFromOption(p.supplyOption), p.enableCreatorAlloc);
+        Alloc memory a = _computeAlloc(_supplyFromOption(p.supplyOption), p.enableCreatorAlloc);
 
-        StandardToken(token).initForLaunchpad(p.name, p.symbol, supply, address(this), msg.sender, p.metaURI);
-        _registerToken(token, TokenType.STANDARD, supply, liqTokens, creatorTokens, bcTokens, address(0), p);
+        StandardToken(token).initForLaunchpad(p.name, p.symbol, a.supply, address(this), msg.sender, p.metaURI);
+        _registerToken(token, TokenType.STANDARD, a, address(0), p.enableAntibot, p.antibotBlocks);
 
         if (earlyBuy > 0) _executeBuy(token, msg.sender, earlyBuy, 0, true);
 
-        emit TokenCreated(token, TokenType.STANDARD, msg.sender, supply,
+        emit TokenCreated(token, TokenType.STANDARD, msg.sender, a.supply,
             p.enableAntibot, tokens[token].tradingBlock);
     }
 
@@ -362,25 +373,21 @@ contract LaunchpadFactory {
      *         msg.value must cover the creation fee in BNB.
      *         Any excess BNB is used as an immediate antibot-exempt buy.
      */
-    function createTT(CreateTTParams calldata p) external payable nonReentrant returns (address payable token) {
+    function createTT(CreateTTParams memory p) external payable nonReentrant returns (address payable token) {
         uint256 earlyBuy = _collectCreationFee();
-        token = _cloneCreate2(taxImpl, p.base.salt);
+        token = payable(_cloneCreate2(taxImpl, p.salt));
 
-        (uint256 supply, uint256 liqTokens, uint256 creatorTokens, uint256 bcTokens)
-            = _computeAlloc(_supplyFromOption(p.base.supplyOption), p.base.enableCreatorAlloc);
+        Alloc memory a = _computeAlloc(_supplyFromOption(p.supplyOption), p.enableCreatorAlloc);
 
         TaxToken(token).initForLaunchpad(
-            p.base.name, p.base.symbol, supply, address(this),
-            p.wallets, p.buyTaxes, p.sellTaxes, p.swapThreshold, msg.sender, p.base.metaURI,
-            pancakeRouter
+            p.name, p.symbol, a.supply, address(this), msg.sender, p.metaURI, pancakeRouter
         );
-        _registerToken(token, TokenType.TAX, supply, liqTokens, creatorTokens, bcTokens,
-            TaxToken(token).pancakePair(), p.base);
+        _registerToken(token, TokenType.TAX, a, TaxToken(token).pancakePair(), p.enableAntibot, p.antibotBlocks);
 
         if (earlyBuy > 0) _executeBuy(token, msg.sender, earlyBuy, 0, true);
 
-        emit TokenCreated(token, TokenType.TAX, msg.sender, supply,
-            p.base.enableAntibot, tokens[token].tradingBlock);
+        emit TokenCreated(token, TokenType.TAX, msg.sender, a.supply,
+            p.enableAntibot, tokens[token].tradingBlock);
     }
 
     /**
@@ -390,25 +397,21 @@ contract LaunchpadFactory {
      *         Taxes start at 0 % — the token owner must call setBuyTaxes /
      *         setSellTaxes post-deployment to enable reflection.
      */
-    function createRFL(CreateRFLParams calldata p) external payable nonReentrant returns (address payable token) {
+    function createRFL(CreateRFLParams memory p) external payable nonReentrant returns (address payable token) {
         uint256 earlyBuy = _collectCreationFee();
-        token = _cloneCreate2(reflectionImpl, p.base.salt);
+        token = payable(_cloneCreate2(reflectionImpl, p.salt));
 
-        (uint256 supply, uint256 liqTokens, uint256 creatorTokens, uint256 bcTokens)
-            = _computeAlloc(_supplyFromOption(p.base.supplyOption), p.base.enableCreatorAlloc);
+        Alloc memory a = _computeAlloc(_supplyFromOption(p.supplyOption), p.enableCreatorAlloc);
 
         ReflectionToken(token).initForLaunchpad(
-            p.base.name, p.base.symbol, supply, address(this),
-            p.wallets, p.swapThreshold, msg.sender, p.base.metaURI,
-            pancakeRouter
+            p.name, p.symbol, a.supply, address(this), msg.sender, p.metaURI, pancakeRouter
         );
-        _registerToken(token, TokenType.REFLECTION, supply, liqTokens, creatorTokens, bcTokens,
-            ReflectionToken(token).pancakePair(), p.base);
+        _registerToken(token, TokenType.REFLECTION, a, ReflectionToken(token).pancakePair(), p.enableAntibot, p.antibotBlocks);
 
         if (earlyBuy > 0) _executeBuy(token, msg.sender, earlyBuy, 0, true);
 
-        emit TokenCreated(token, TokenType.REFLECTION, msg.sender, supply,
-            p.base.enableAntibot, tokens[token].tradingBlock);
+        emit TokenCreated(token, TokenType.REFLECTION, msg.sender, a.supply,
+            p.enableAntibot, tokens[token].tradingBlock);
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -618,14 +621,11 @@ contract LaunchpadFactory {
         _dispatchFee(creationFee);
     }
 
-    function _computeAlloc(uint256 supply, bool hasCreator)
-        internal pure
-        returns (uint256 total, uint256 liqTokens, uint256 creatorTokens, uint256 bcTokens)
-    {
-        total         = supply;
-        liqTokens     = (supply * LIQUIDITY_BPS) / BPS_DENOM;
-        creatorTokens = hasCreator ? (supply * CREATOR_BPS) / BPS_DENOM : 0;
-        bcTokens      = supply - liqTokens - creatorTokens;
+    function _computeAlloc(uint256 supply, bool hasCreator) internal pure returns (Alloc memory a) {
+        a.supply        = supply;
+        a.liqTokens     = (supply * LIQUIDITY_BPS) / BPS_DENOM;
+        a.creatorTokens = hasCreator ? (supply * CREATOR_BPS) / BPS_DENOM : 0;
+        a.bcTokens      = supply - a.liqTokens - a.creatorTokens;
     }
 
     function _supplyFromOption(SupplyOption opt) internal pure returns (uint256) {
@@ -656,42 +656,37 @@ contract LaunchpadFactory {
 
     /// @dev Register token config and set up creator vesting if applicable.
     function _registerToken(
-        address       token_,
-        TokenType     tokenType_,
-        uint256       supply,
-        uint256       liqTokens,
-        uint256       creatorTokens,
-        uint256       bcTokens,
-        address       pair_,
-        BaseParams calldata p
+        address      token_,
+        TokenType    tokenType_,
+        Alloc memory a,
+        address      pair_,
+        bool         enableAntibot_,
+        uint256      antibotBlocks_
     ) internal {
-        uint256 vBNB = p.customVirtualBNB      > 0 ? p.customVirtualBNB      : defaultVirtualBNB;
-        uint256 mTgt = p.customMigrationTarget > 0 ? p.customMigrationTarget : defaultMigrationTarget;
-
-        if (vBNB == 0) revert ZeroAmount();
-        if (mTgt == 0) revert ZeroAmount();
+        uint256 vBNB = defaultVirtualBNB;
+        uint256 mTgt = defaultMigrationTarget;
 
         uint256 antibotBlocks = 0;
-        if (p.enableAntibot) {
-            if (p.antibotBlocks < ANTIBOT_MIN_BLOCKS || p.antibotBlocks > ANTIBOT_MAX_BLOCKS)
+        if (enableAntibot_) {
+            if (antibotBlocks_ < ANTIBOT_MIN_BLOCKS || antibotBlocks_ > ANTIBOT_MAX_BLOCKS)
                 revert AntibotBlocksOutOfRange();
-            antibotBlocks = p.antibotBlocks;
+            antibotBlocks = antibotBlocks_;
         }
 
         TokenConfig storage tc = tokens[token_];
         tc.token            = token_;
         tc.tokenType        = tokenType_;
         tc.creator          = msg.sender;
-        tc.totalSupply      = supply;
-        tc.liquidityTokens  = liqTokens;
-        tc.creatorTokens    = creatorTokens;
-        tc.bcTokensTotal    = bcTokens;
+        tc.totalSupply      = a.supply;
+        tc.liquidityTokens  = a.liqTokens;
+        tc.creatorTokens    = a.creatorTokens;
+        tc.bcTokensTotal    = a.bcTokens;
         tc.bcTokensSold     = 0;
         tc.virtualBNB       = vBNB;
-        tc.k                = vBNB * bcTokens;
+        tc.k                = vBNB * a.bcTokens;
         tc.raisedBNB        = 0;
         tc.migrationTarget  = mTgt;
-        tc.antibotEnabled   = p.enableAntibot;
+        tc.antibotEnabled   = enableAntibot_;
         tc.creationBlock    = block.number;
         tc.tradingBlock     = block.number + antibotBlocks;
         tc.migrated         = false;
@@ -699,12 +694,11 @@ contract LaunchpadFactory {
         allTokens.push(token_);
         _tokensByCreator[msg.sender].push(token_);
 
-        // pair_ is set by the token itself during initForLaunchpad (address(0) for StandardToken).
         tc.pair = pair_;
 
-        if (creatorTokens > 0) {
-            ILaunchpadToken(token_).transfer(token_, creatorTokens);
-            ILaunchpadToken(token_).setupVesting(msg.sender, creatorTokens);
+        if (a.creatorTokens > 0) {
+            ILaunchpadToken(token_).transfer(token_, a.creatorTokens);
+            ILaunchpadToken(token_).setupVesting(msg.sender, a.creatorTokens);
         }
     }
 

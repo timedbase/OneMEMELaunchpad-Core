@@ -146,10 +146,6 @@ contract TaxToken is ILaunchpadToken {
         string    calldata symbol_,
         uint256            totalSupply_,
         address            factory_,
-        address[3] calldata wallets_,
-        uint256[5] calldata buyTaxes_,
-        uint256[5] calldata sellTaxes_,
-        uint256            swapThreshold_,
         address            tokenOwner_,
         string    calldata metaURI_,
         address            router_
@@ -158,7 +154,6 @@ contract TaxToken is ILaunchpadToken {
         if (factory_    == address(0)) revert ZeroAddress();
         if (tokenOwner_ == address(0)) revert ZeroAddress();
         if (router_     == address(0)) revert ZeroAddress();
-        for (uint256 i; i < 3; ) { if (wallets_[i] == address(0)) revert ZeroAddress(); unchecked { ++i; } }
 
         _initialized    = true;
         _inBondingPhase = true;
@@ -169,24 +164,15 @@ contract TaxToken is ILaunchpadToken {
         _symbol      = symbol_;
         _totalSupply = totalSupply_;
 
-        marketingWallet = wallets_[0];
-        teamWallet      = wallets_[1];
-        treasuryWallet  = wallets_[2];
+        // Wallets default to owner — updatable post-deployment via setWallets().
+        marketingWallet = tokenOwner_;
+        teamWallet      = tokenOwner_;
+        treasuryWallet  = tokenOwner_;
 
-        buyMarketingTax  = buyTaxes_[0]; buyTeamTax      = buyTaxes_[1];
-        buyTreasuryTax   = buyTaxes_[2]; buyBurnTax      = buyTaxes_[3];
-        buyLiquidityTax  = buyTaxes_[4];
-        if (buyMarketingTax + buyTeamTax + buyTreasuryTax + buyBurnTax + buyLiquidityTax > MAX_TOTAL_TAX)
-            revert TaxExceedsMax();
+        // All taxes start at 0 % — updatable post-deployment via setBuyTaxes/setSellTaxes().
 
-        sellMarketingTax = sellTaxes_[0]; sellTeamTax     = sellTaxes_[1];
-        sellTreasuryTax  = sellTaxes_[2]; sellBurnTax     = sellTaxes_[3];
-        sellLiquidityTax = sellTaxes_[4];
-        if (sellMarketingTax + sellTeamTax + sellTreasuryTax + sellBurnTax + sellLiquidityTax > MAX_TOTAL_TAX)
-            revert TaxExceedsMax();
-
-        if (swapThreshold_ < totalSupply_ * MIN_SWAP_THRESHOLD_BPS / BPS_DENOM) revert SwapThresholdTooLow();
-        swapThreshold = swapThreshold_;
+        // swapThreshold defaults to 0.1 % of supply — updatable post-deployment via setSwapThreshold().
+        swapThreshold = totalSupply_ / 1000;
         swapEnabled   = false;
 
         _isExcludedFromFee[factory_]       = true;
