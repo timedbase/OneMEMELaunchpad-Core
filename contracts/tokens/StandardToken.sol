@@ -25,6 +25,8 @@ contract StandardToken is ILaunchpadToken {
     error BNBTransferFailed();
     error TokenRescueFailed();
     error CannotRescueOwnToken();
+    error PermitExpired();
+    error InvalidSignature();
 
     bool    private _initialized;
     address private _owner;
@@ -36,6 +38,13 @@ contract StandardToken is ILaunchpadToken {
 
     mapping(address => uint256)                     private _balances;
     mapping(address => mapping(address => uint256)) private _allowances;
+
+    // ─── EIP-2612 Permit ──────────────────────────────────────────────────
+    bytes32 private constant PERMIT_TYPEHASH =
+        keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)");
+    mapping(address => uint256) public nonces;
+    bytes32 private _DOMAIN_SEPARATOR;
+    uint256 private _cachedChainId;
 
     // ─── Token metadata URI ───────────────────────────────────────────────
     string private _metaURI;
@@ -94,6 +103,9 @@ contract StandardToken is ILaunchpadToken {
         _balances[factory_] = totalSupply_;
         emit Transfer(address(0), factory_, totalSupply_);
         emit OwnershipTransferred(address(0), tokenOwner_);
+
+        _cachedChainId    = block.chainid;
+        _DOMAIN_SEPARATOR = _buildDomainSeparator();
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -219,6 +231,55 @@ contract StandardToken is ILaunchpadToken {
         if (owner_ == address(0) || spender == address(0)) revert ZeroAddress();
         _allowances[owner_][spender] = amount;
         emit Approval(owner_, spender, amount);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // EIP-2612 PERMIT
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// @notice EIP-712 domain separator.  Recomputed on chain forks.
+    function DOMAIN_SEPARATOR() public view returns (bytes32) {
+        if (block.chainid == _cachedChainId) return _DOMAIN_SEPARATOR;
+        return _buildDomainSeparator();
+    }
+
+    function _buildDomainSeparator() private view returns (bytes32) {
+        return keccak256(abi.encode(
+            keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+            keccak256(bytes(_name)),
+            keccak256("1"),
+            block.chainid,
+            address(this)
+        ));
+    }
+
+    /**
+     * @notice EIP-2612 permit — approve by signature, enabling approve + trade in one tx.
+     * @param owner_   Token owner granting the approval
+     * @param spender  Address being approved
+     * @param value    Allowance amount
+     * @param deadline Unix timestamp after which the signature is invalid
+     * @param v,r,s    EIP-712 signature components
+     */
+    function permit(
+        address owner_,
+        address spender,
+        uint256 value,
+        uint256 deadline,
+        uint8   v,
+        bytes32 r,
+        bytes32 s
+    ) external {
+        if (block.timestamp > deadline) revert PermitExpired();
+        bytes32 structHash = keccak256(abi.encode(
+            PERMIT_TYPEHASH, owner_, spender, value, nonces[owner_]++, deadline
+        ));
+        address signer = ecrecover(
+            keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR(), structHash)),
+            v, r, s
+        );
+        if (signer == address(0) || signer != owner_) revert InvalidSignature();
+        _approve(owner_, spender, value);
     }
 
     // ─────────────────────────────────────────────────────────────────────

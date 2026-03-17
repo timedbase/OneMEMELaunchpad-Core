@@ -60,6 +60,8 @@ contract TaxToken is ILaunchpadToken {
     error NothingToClaim();
     error BNBTransferFailed();
     error TokenRescueFailed();
+    error PermitExpired();
+    error InvalidSignature();
 
     address private _owner;
     address private _factory;
@@ -98,6 +100,13 @@ contract TaxToken is ILaunchpadToken {
     mapping(address => uint256)                     private _balances;
     mapping(address => mapping(address => uint256)) private _allowances;
     mapping(address => bool)                        private _isExcludedFromFee;
+
+    // ─── EIP-2612 Permit ──────────────────────────────────────────────────
+    bytes32 private constant PERMIT_TYPEHASH =
+        keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)");
+    mapping(address => uint256) public nonces;
+    bytes32 private _DOMAIN_SEPARATOR;
+    uint256 private _cachedChainId;
 
     IPancakeRouter02TT public pancakeRouter;
     address            public pancakePair;
@@ -196,6 +205,9 @@ contract TaxToken is ILaunchpadToken {
         _balances[factory_] = totalSupply_;
         emit Transfer(address(0), factory_, totalSupply_);
         emit OwnershipTransferred(address(0), tokenOwner_);
+
+        _cachedChainId    = block.chainid;
+        _DOMAIN_SEPARATOR = _buildDomainSeparator();
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -320,26 +332,22 @@ contract TaxToken is ILaunchpadToken {
     // ─────────────────────────────────────────────────────────────────────
 
     function swapAndDistribute(uint256 tokenAmount) private lockSwap {
-        uint256 totalBuy  = buyMarketingTax  + buyTeamTax  + buyTreasuryTax  + buyLiquidityTax;
-        uint256 totalSell = sellMarketingTax + sellTeamTax + sellTreasuryTax + sellLiquidityTax;
-        uint256 totalTax  = totalBuy + totalSell;
+        uint256 lpBPS    = buyLiquidityTax + sellLiquidityTax;
+        uint256 totalTax = buyMarketingTax + buyTeamTax + buyTreasuryTax + lpBPS
+                         + sellMarketingTax + sellTeamTax + sellTreasuryTax;
         if (totalTax == 0) return;
 
-        uint256 lpTokens = (tokenAmount * (buyLiquidityTax + sellLiquidityTax)) / totalTax;
-        uint256 halfLP   = lpTokens / 2;
-        uint256 toSwap   = tokenAmount - halfLP;
+        uint256 halfLP = (tokenAmount * lpBPS / totalTax) / 2;
+        uint256 preBNB = address(this).balance;
+        _swapTokensForBNB(tokenAmount - halfLP);
+        uint256 gotBNB = address(this).balance - preBNB;
 
-        uint256 initBNB  = address(this).balance;
-        _swapTokensForBNB(toSwap);
-        uint256 gotBNB   = address(this).balance - initBNB;
+        uint256 denom = totalTax - lpBPS / 2;
+        if (denom == 0) return;
 
-        uint256 denominator = totalTax - (buyLiquidityTax + sellLiquidityTax) / 2;
-        if (denominator == 0) return;
-
-        uint256 bnbLP        = (gotBNB * ((buyLiquidityTax + sellLiquidityTax) / 2)) / denominator;
-        uint256 bnbMarketing = (gotBNB * (buyMarketingTax + sellMarketingTax))        / denominator;
-        uint256 bnbTeam      = (gotBNB * (buyTeamTax      + sellTeamTax))             / denominator;
-        uint256 bnbTreasury  =  gotBNB - bnbLP - bnbMarketing - bnbTeam;
+        uint256 bnbLP        = (gotBNB * (lpBPS / 2))                            / denom;
+        uint256 bnbMarketing = (gotBNB * (buyMarketingTax + sellMarketingTax))   / denom;
+        uint256 bnbTeam      = (gotBNB * (buyTeamTax      + sellTeamTax))        / denom;
 
         if (halfLP > 0 && bnbLP > 0) {
             _addLiquidity(halfLP, bnbLP);
@@ -347,7 +355,7 @@ contract TaxToken is ILaunchpadToken {
         }
         _safeSendBNB(marketingWallet, bnbMarketing);
         _safeSendBNB(teamWallet,      bnbTeam);
-        _safeSendBNB(treasuryWallet,  bnbTreasury);
+        _safeSendBNB(treasuryWallet,  gotBNB - bnbLP - bnbMarketing - bnbTeam);
     }
 
     function _swapTokensForBNB(uint256 tokenAmount) private {
@@ -381,6 +389,55 @@ contract TaxToken is ILaunchpadToken {
         if (owner_ == address(0) || spender == address(0)) revert ZeroAddress();
         _allowances[owner_][spender] = amount;
         emit Approval(owner_, spender, amount);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // EIP-2612 PERMIT
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// @notice EIP-712 domain separator.  Recomputed on chain forks.
+    function DOMAIN_SEPARATOR() public view returns (bytes32) {
+        if (block.chainid == _cachedChainId) return _DOMAIN_SEPARATOR;
+        return _buildDomainSeparator();
+    }
+
+    function _buildDomainSeparator() private view returns (bytes32) {
+        return keccak256(abi.encode(
+            keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+            keccak256(bytes(_name)),
+            keccak256("1"),
+            block.chainid,
+            address(this)
+        ));
+    }
+
+    /**
+     * @notice EIP-2612 permit — approve by signature, enabling approve + trade in one tx.
+     * @param owner_   Token owner granting the approval
+     * @param spender  Address being approved
+     * @param value    Allowance amount
+     * @param deadline Unix timestamp after which the signature is invalid
+     * @param v,r,s    EIP-712 signature components
+     */
+    function permit(
+        address owner_,
+        address spender,
+        uint256 value,
+        uint256 deadline,
+        uint8   v,
+        bytes32 r,
+        bytes32 s
+    ) external {
+        if (block.timestamp > deadline) revert PermitExpired();
+        bytes32 structHash = keccak256(abi.encode(
+            PERMIT_TYPEHASH, owner_, spender, value, nonces[owner_]++, deadline
+        ));
+        address signer = ecrecover(
+            keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR(), structHash)),
+            v, r, s
+        );
+        if (signer == address(0) || signer != owner_) revert InvalidSignature();
+        _approve(owner_, spender, value);
     }
 
     // ─────────────────────────────────────────────────────────────────────

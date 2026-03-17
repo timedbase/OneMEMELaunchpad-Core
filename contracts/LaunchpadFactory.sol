@@ -555,16 +555,15 @@ contract LaunchpadFactory {
         if (tc.token == address(0)) revert UnknownToken();
         if (tc.migrated)            revert AlreadyMigrated();
 
-        uint256 poolBNB    = tc.virtualBNB + tc.raisedBNB;
-        uint256 poolTokens = tc.bcTokensTotal - tc.bcTokensSold;
-
         // grossNeeded = ceil(bnbNeeded / (1 - totalFee%))
         // After fee deduction, net BNB collected equals exactly migrationTarget.
-        uint256 totalFee    = platformFee + charityFee;
-        uint256 bnbNeeded   = tc.migrationTarget - tc.raisedBNB;
+        uint256 totalFee   = platformFee + charityFee;
+        uint256 poolBNB    = tc.virtualBNB + tc.raisedBNB;
+        uint256 poolTokens = tc.bcTokensTotal - tc.bcTokensSold;
+        // Inline bnbNeeded to reduce stack depth.
         uint256 grossNeeded = totalFee == 0
-            ? bnbNeeded
-            : (bnbNeeded * BPS_DENOM + (BPS_DENOM - totalFee) - 1) / (BPS_DENOM - totalFee);
+            ? tc.migrationTarget - tc.raisedBNB
+            : ((tc.migrationTarget - tc.raisedBNB) * BPS_DENOM + (BPS_DENOM - totalFee) - 1) / (BPS_DENOM - totalFee);
 
         uint256 refund;
         uint256 fee;
@@ -579,11 +578,10 @@ contract LaunchpadFactory {
             tokensOut = poolTokens;
         } else {
             // Ceiling division: round fee up so the protocol never loses BNB to truncation.
-            fee       = totalFee == 0 ? 0 : (bnbIn * totalFee + BPS_DENOM - 1) / BPS_DENOM;
-            netBNB    = bnbIn - fee;
-            uint256 newPoolBNB = poolBNB + netBNB;
-            // Ceiling division: round up k/newPoolBNB so tokensOut is slightly smaller, protecting the pool.
-            tokensOut = poolTokens - ((tc.k + newPoolBNB - 1) / newPoolBNB);
+            fee    = totalFee == 0 ? 0 : (bnbIn * totalFee + BPS_DENOM - 1) / BPS_DENOM;
+            netBNB = bnbIn - fee;
+            // Inline newPoolBNB to reduce stack depth; ceiling division protects the pool.
+            tokensOut = poolTokens - ((tc.k + poolBNB + netBNB - 1) / (poolBNB + netBNB));
         }
 
         if (tokensOut == 0)     revert ZeroAmount();
@@ -965,19 +963,17 @@ contract LaunchpadFactory {
         uint256 poolBNB    = tc.virtualBNB + tc.raisedBNB;
         uint256 poolTokens = tc.bcTokensTotal - tc.bcTokensSold;
         uint256 totalFee   = platformFee + charityFee;
-        uint256 bnbNeeded  = tc.migrationTarget - tc.raisedBNB;
         uint256 grossNeeded = totalFee == 0
-            ? bnbNeeded
-            : (bnbNeeded * BPS_DENOM + (BPS_DENOM - totalFee) - 1) / (BPS_DENOM - totalFee);
+            ? tc.migrationTarget - tc.raisedBNB
+            : ((tc.migrationTarget - tc.raisedBNB) * BPS_DENOM + (BPS_DENOM - totalFee) - 1) / (BPS_DENOM - totalFee);
 
         if (bnbIn >= grossNeeded) {
             feeBNB    = (grossNeeded * totalFee) / BPS_DENOM; // floor, mirrors execution path
             tokensOut = poolTokens;
         } else {
-            feeBNB    = totalFee == 0 ? 0 : (bnbIn * totalFee + BPS_DENOM - 1) / BPS_DENOM;
-            uint256 netBNB    = bnbIn - feeBNB;
-            uint256 newPoolBNB = poolBNB + netBNB;
-            tokensOut = poolTokens - ((tc.k + newPoolBNB - 1) / newPoolBNB);
+            feeBNB        = totalFee == 0 ? 0 : (bnbIn * totalFee + BPS_DENOM - 1) / BPS_DENOM;
+            uint256 netBNB = bnbIn - feeBNB;
+            tokensOut = poolTokens - ((tc.k + poolBNB + netBNB - 1) / (poolBNB + netBNB));
         }
     }
 
