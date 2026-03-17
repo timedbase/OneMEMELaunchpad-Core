@@ -475,39 +475,49 @@ contract LaunchpadFactory {
      */
     function sell(address token_, uint256 amountIn, uint256 minBNBOut, uint256 deadline) external nonReentrant {
         if (block.timestamp > deadline) revert DeadlineExpired();
-        TokenConfig storage tc = tokens[token_];
-        if (tc.token == address(0)) revert UnknownToken();
-        if (tc.migrated)            revert AlreadyMigrated();
-        if (amountIn == 0)          revert ZeroAmount();
-        if (tc.bcTokensSold < amountIn) revert ExceedsSoldSupply();
+        if (amountIn == 0) revert ZeroAmount();
 
-        ILaunchpadToken(token_).transferFrom(msg.sender, address(this), amountIn);
+        // Outer variables populated inside the scoped block then used after.
+        uint256 fee;
+        uint256 netBNB;
+        uint256 raisedAfter;
 
-        uint256 poolBNB       = tc.virtualBNB + tc.raisedBNB;
-        uint256 poolTokens    = tc.bcTokensTotal - tc.bcTokensSold;
-        uint256 newPoolTokens = poolTokens + amountIn;
-        // Ceiling division: round newPoolBNB up so grossBNB is slightly smaller, protecting the pool.
-        uint256 newPoolBNB    = (tc.k + newPoolTokens - 1) / newPoolTokens;
-        uint256 grossBNB      = poolBNB > newPoolBNB ? poolBNB - newPoolBNB : 0;
-        if (grossBNB > tc.raisedBNB) revert InsufficientPoolBNB();
+        {   // Scoped block: tc/poolBNB/poolTokens/.../totalFee are freed on exit,
+            // preventing stack-too-deep when _dispatchFee runs below.
+            TokenConfig storage tc = tokens[token_];
+            if (tc.token == address(0)) revert UnknownToken();
+            if (tc.migrated)            revert AlreadyMigrated();
+            if (tc.bcTokensSold < amountIn) revert ExceedsSoldSupply();
 
-        uint256 totalFee = platformFee + charityFee;
-        // Ceiling division: round fee up so the protocol never loses BNB to truncation.
-        uint256 fee    = totalFee == 0 ? 0 : (grossBNB * totalFee + BPS_DENOM - 1) / BPS_DENOM;
-        uint256 netBNB = grossBNB - fee;
-        if (netBNB < minBNBOut) revert SlippageTooLittleBNB();
+            ILaunchpadToken(token_).transferFrom(msg.sender, address(this), amountIn);
 
-        tc.raisedBNB    -= grossBNB;
-        // Guard against _totalRaisedBNB drift from rounding across many trades.
-        if (grossBNB >= _totalRaisedBNB) _totalRaisedBNB = 0;
-        else                             _totalRaisedBNB -= grossBNB;
-        tc.bcTokensSold -= amountIn;
+            uint256 poolBNB       = tc.virtualBNB + tc.raisedBNB;
+            uint256 poolTokens    = tc.bcTokensTotal - tc.bcTokensSold;
+            uint256 newPoolTokens = poolTokens + amountIn;
+            // Ceiling division: round newPoolBNB up so grossBNB is slightly smaller, protecting the pool.
+            uint256 newPoolBNB    = (tc.k + newPoolTokens - 1) / newPoolTokens;
+            uint256 grossBNB      = poolBNB > newPoolBNB ? poolBNB - newPoolBNB : 0;
+            if (grossBNB > tc.raisedBNB) revert InsufficientPoolBNB();
+
+            uint256 totalFee = platformFee + charityFee;
+            // Ceiling division: round fee up so the protocol never loses BNB to truncation.
+            fee    = totalFee == 0 ? 0 : (grossBNB * totalFee + BPS_DENOM - 1) / BPS_DENOM;
+            netBNB = grossBNB - fee;
+            if (netBNB < minBNBOut) revert SlippageTooLittleBNB();
+
+            tc.raisedBNB -= grossBNB;
+            // Guard against _totalRaisedBNB drift from rounding across many trades.
+            if (grossBNB >= _totalRaisedBNB) _totalRaisedBNB = 0;
+            else                             _totalRaisedBNB -= grossBNB;
+            tc.bcTokensSold -= amountIn;
+            raisedAfter = tc.raisedBNB;
+        }
 
         (bool ok,) = payable(msg.sender).call{value: netBNB}("");
         if (!ok) revert BNBTransferFailed();
 
         _dispatchFee(fee);
-        emit TokenSold(token_, msg.sender, amountIn, netBNB, tc.raisedBNB);
+        emit TokenSold(token_, msg.sender, amountIn, netBNB, raisedAfter);
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -555,41 +565,44 @@ contract LaunchpadFactory {
         if (tc.token == address(0)) revert UnknownToken();
         if (tc.migrated)            revert AlreadyMigrated();
 
-        // grossNeeded = ceil(bnbNeeded / (1 - totalFee%))
-        // After fee deduction, net BNB collected equals exactly migrationTarget.
-        uint256 totalFee   = platformFee + charityFee;
-        uint256 poolBNB    = tc.virtualBNB + tc.raisedBNB;
-        uint256 poolTokens = tc.bcTokensTotal - tc.bcTokensSold;
-        // Inline bnbNeeded to reduce stack depth.
-        uint256 grossNeeded = totalFee == 0
-            ? tc.migrationTarget - tc.raisedBNB
-            : ((tc.migrationTarget - tc.raisedBNB) * BPS_DENOM + (BPS_DENOM - totalFee) - 1) / (BPS_DENOM - totalFee);
-
+        // Outer variables assigned inside the scoped block below, then used after it ends.
         uint256 refund;
         uint256 fee;
-        uint256 netBNB;
         uint256 tokensOut;
 
-        if (bnbIn >= grossNeeded) {
-            refund    = bnbIn - grossNeeded;
-            // Floor division intentional: ensures netBNB >= bnbNeeded for migration to trigger.
-            fee       = (grossNeeded * totalFee) / BPS_DENOM;
-            netBNB    = grossNeeded - fee;
-            tokensOut = poolTokens;
-        } else {
-            // Ceiling division: round fee up so the protocol never loses BNB to truncation.
-            fee    = totalFee == 0 ? 0 : (bnbIn * totalFee + BPS_DENOM - 1) / BPS_DENOM;
-            netBNB = bnbIn - fee;
-            // Inline newPoolBNB to reduce stack depth; ceiling division protects the pool.
-            tokensOut = poolTokens - ((tc.k + poolBNB + netBNB - 1) / (poolBNB + netBNB));
+        {   // Scoped block: totalFee/poolBNB/poolTokens/grossNeeded/netBNB are freed when
+            // this block exits, preventing stack-too-deep when _settleTokens runs.
+            uint256 totalFee   = platformFee + charityFee;
+            uint256 poolBNB    = tc.virtualBNB + tc.raisedBNB;
+            uint256 poolTokens = tc.bcTokensTotal - tc.bcTokensSold;
+            // grossNeeded = ceil(bnbNeeded / (1 - totalFee%))
+            // After fee deduction, net BNB collected equals exactly migrationTarget.
+            uint256 grossNeeded = totalFee == 0
+                ? tc.migrationTarget - tc.raisedBNB
+                : ((tc.migrationTarget - tc.raisedBNB) * BPS_DENOM + (BPS_DENOM - totalFee) - 1) / (BPS_DENOM - totalFee);
+            uint256 netBNB;
+
+            if (bnbIn >= grossNeeded) {
+                refund    = bnbIn - grossNeeded;
+                // Floor division intentional: ensures netBNB >= bnbNeeded for migration to trigger.
+                fee       = (grossNeeded * totalFee) / BPS_DENOM;
+                netBNB    = grossNeeded - fee;
+                tokensOut = poolTokens;
+            } else {
+                // Ceiling division: round fee up so the protocol never loses BNB to truncation.
+                fee       = totalFee == 0 ? 0 : (bnbIn * totalFee + BPS_DENOM - 1) / BPS_DENOM;
+                netBNB    = bnbIn - fee;
+                // Inline newPoolBNB; ceiling division protects the pool.
+                tokensOut = poolTokens - ((tc.k + poolBNB + netBNB - 1) / (poolBNB + netBNB));
+            }
+
+            if (tokensOut == 0)     revert ZeroAmount();
+            if (tokensOut < minOut) revert SlippageTooFewTokens();
+
+            tc.raisedBNB    += netBNB;
+            _totalRaisedBNB += netBNB;
+            tc.bcTokensSold += tokensOut;
         }
-
-        if (tokensOut == 0)     revert ZeroAmount();
-        if (tokensOut < minOut) revert SlippageTooFewTokens();
-
-        tc.raisedBNB    += netBNB;
-        _totalRaisedBNB += netBNB;
-        tc.bcTokensSold += tokensOut;
 
         _dispatchFee(fee);
         _settleTokens(token_, buyer, tokensOut, refund, bnbIn, skipAntibot, tc);
