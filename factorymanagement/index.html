@@ -6,17 +6,17 @@
   <title>OneMEME — Factory Management</title>
   <script src="https://cdn.jsdelivr.net/npm/ethers@6.13.4/dist/ethers.umd.min.js"></script>
   <style>
-    /* ── Reset & Base ──────────────────────────────────────────────── */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     :root {
       --bg:       #0d0d0f;
       --surface:  #141417;
       --border:   #242428;
-      --accent:   #f0b90b;   /* BNB yellow */
+      --accent:   #f0b90b;
       --accent2:  #e8a800;
       --danger:   #e05252;
       --ok:       #42b883;
+      --warn:     #f0a30b;
       --text:     #e8e8ed;
       --muted:    #7a7a8a;
       --radius:   10px;
@@ -32,14 +32,9 @@
       line-height: 1.5;
     }
 
-    /* ── Layout ────────────────────────────────────────────────────── */
-    .shell {
-      max-width: 1100px;
-      margin: 0 auto;
-      padding: 0 var(--gap) 60px;
-    }
+    .shell { max-width: 1100px; margin: 0 auto; padding: 0 var(--gap) 60px; }
 
-    /* ── Header ────────────────────────────────────────────────────── */
+    /* ── Header ─────────────────────────────────────────────────────── */
     header {
       display: flex;
       align-items: center;
@@ -53,12 +48,7 @@
     .logo { font-size: 18px; font-weight: 700; letter-spacing: -.3px; }
     .logo span { color: var(--accent); }
 
-    .header-right {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      flex-wrap: wrap;
-    }
+    .header-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 
     #factoryInput {
       background: var(--surface);
@@ -88,15 +78,14 @@
     }
     .btn:hover { background: var(--accent2); }
     .btn:disabled { opacity: .45; cursor: not-allowed; }
-    .btn.secondary {
-      background: var(--surface);
-      color: var(--text);
-      border: 1px solid var(--border);
-    }
+    .btn.secondary { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
     .btn.secondary:hover { border-color: var(--accent); color: var(--accent); }
     .btn.danger { background: var(--danger); color: #fff; }
     .btn.danger:hover { background: #c94444; }
+    .btn.ok { background: var(--ok); color: #0d0d0f; }
+    .btn.ok:hover { background: #37a070; }
     .btn.small { padding: 5px 11px; font-size: 12px; }
+    .btn.full { width: 100%; justify-content: center; margin-top: 4px; }
 
     .badge {
       display: inline-flex;
@@ -107,16 +96,16 @@
       border-radius: 20px;
       font-weight: 600;
     }
-    .badge.owner  { background: #f0b90b22; color: var(--accent); border: 1px solid #f0b90b44; }
-    .badge.wallet { background: #42b88322; color: var(--ok);    border: 1px solid #42b88344; }
-    .badge.disconnected { background: #e0525222; color: var(--danger); border: 1px solid #e0525244; }
+    .badge.owner       { background: #f0b90b22; color: var(--accent);  border: 1px solid #f0b90b44; }
+    .badge.wallet      { background: #42b88322; color: var(--ok);      border: 1px solid #42b88344; }
+    .badge.disconnected{ background: #e0525222; color: var(--danger);  border: 1px solid #e0525244; }
+    .badge.timelock    { background: #f0a30b22; color: var(--warn);    border: 1px solid #f0a30b44;
+                         font-size: 11px; padding: 3px 8px; }
     .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 
-    /* ── Toast ─────────────────────────────────────────────────────── */
+    /* ── Toast ──────────────────────────────────────────────────────── */
     #toast {
-      position: fixed;
-      bottom: 24px;
-      right: 24px;
+      position: fixed; bottom: 24px; right: 24px;
       max-width: 380px;
       background: var(--surface);
       border: 1px solid var(--border);
@@ -127,11 +116,11 @@
       display: none;
       word-break: break-all;
     }
-    #toast.ok     { border-color: var(--ok);     color: var(--ok); }
-    #toast.err    { border-color: var(--danger);  color: var(--danger); }
-    #toast.info   { border-color: var(--accent);  color: var(--accent); }
+    #toast.ok   { border-color: var(--ok);     color: var(--ok); }
+    #toast.err  { border-color: var(--danger);  color: var(--danger); }
+    #toast.info { border-color: var(--accent);  color: var(--accent); }
 
-    /* ── Section headings ──────────────────────────────────────────── */
+    /* ── Section headings ────────────────────────────────────────────── */
     .section-title {
       font-size: 11px;
       font-weight: 700;
@@ -141,12 +130,8 @@
       margin: 28px 0 12px;
     }
 
-    /* ── Grid of stat/config cards ─────────────────────────────────── */
-    .stat-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
-      gap: var(--gap);
-    }
+    /* ── Stat grid ───────────────────────────────────────────────────── */
+    .stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: var(--gap); }
     .stat-card {
       background: var(--surface);
       border: 1px solid var(--border);
@@ -154,54 +139,30 @@
       padding: 14px 16px;
     }
     .stat-card .label {
-      font-size: 11px;
-      color: var(--muted);
-      text-transform: uppercase;
-      letter-spacing: .5px;
-      margin-bottom: 6px;
+      font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 6px;
     }
-    .stat-card .value {
-      font-size: 15px;
-      font-weight: 600;
-      word-break: break-all;
-      font-family: monospace;
-    }
+    .stat-card .value { font-size: 15px; font-weight: 600; word-break: break-all; font-family: monospace; }
     .stat-card .value.mono-sm { font-size: 12px; }
     .stat-card .value.accent  { color: var(--accent); }
     .stat-card .value.ok      { color: var(--ok); }
-    .stat-card .value.danger  { color: var(--danger); }
+    .stat-card .value.warn    { color: var(--warn); }
 
-    /* ── Action cards ───────────────────────────────────────────────── */
-    .action-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
-      gap: var(--gap);
-    }
+    /* ── Action grid ──────────────────────────────────────────────────── */
+    .action-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(310px, 1fr)); gap: var(--gap); }
     .action-card {
       background: var(--surface);
       border: 1px solid var(--border);
       border-radius: var(--radius);
       padding: 18px;
     }
-    .action-card h3 {
-      font-size: 14px;
-      font-weight: 600;
-      margin-bottom: 4px;
-    }
-    .action-card .desc {
-      font-size: 12px;
-      color: var(--muted);
-      margin-bottom: 14px;
-    }
+    .action-card h3 { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+    .action-card .desc { font-size: 12px; color: var(--muted); margin-bottom: 14px; }
+    .card-title-row { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
 
     .field { margin-bottom: 10px; }
     .field label {
-      display: block;
-      font-size: 11px;
-      color: var(--muted);
-      margin-bottom: 4px;
-      text-transform: uppercase;
-      letter-spacing: .4px;
+      display: block; font-size: 11px; color: var(--muted); margin-bottom: 4px;
+      text-transform: uppercase; letter-spacing: .4px;
     }
     .field input, .field select {
       width: 100%;
@@ -219,85 +180,27 @@
     .field input::placeholder { color: var(--muted); }
     .field select option { background: var(--bg); }
 
-    .action-card .btn { width: 100%; justify-content: center; margin-top: 4px; }
-
-    /* ── TWAP status bar ────────────────────────────────────────────── */
-    .twap-bar {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 12px 16px;
-      margin-bottom: var(--gap);
-      flex-wrap: wrap;
-    }
-    .twap-bar .item { font-size: 12px; color: var(--muted); }
-    .twap-bar .item strong { color: var(--text); }
-    .twap-bar .sep { color: var(--border); }
-
-    /* ── Registry table ─────────────────────────────────────────────── */
-    .registry {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      overflow: hidden;
-    }
-    .registry-search {
-      display: flex;
-      gap: 10px;
-      padding: 14px 16px;
-      border-bottom: 1px solid var(--border);
-    }
-    .registry-search input {
-      flex: 1;
-      background: var(--bg);
-      border: 1px solid var(--border);
+    /* ── Timelock status strip ────────────────────────────────────────── */
+    .tl-status {
+      margin: 10px 0;
+      padding: 8px 12px;
       border-radius: 7px;
-      color: var(--text);
-      padding: 7px 10px;
-      font-size: 13px;
-      font-family: monospace;
-    }
-    .registry-search input:focus { outline: none; border-color: var(--accent); }
-    .token-list { padding: 6px 0; max-height: 280px; overflow-y: auto; }
-    .token-row {
+      font-size: 12px;
       display: flex;
       align-items: center;
-      justify-content: space-between;
-      padding: 8px 16px;
-      font-size: 12px;
-      font-family: monospace;
-      border-bottom: 1px solid var(--border);
-      gap: 10px;
+      gap: 8px;
     }
-    .token-row:last-child { border-bottom: none; }
-    .token-row:hover { background: #ffffff06; }
-    .token-row .addr { color: var(--text); }
-    .token-row .idx  { color: var(--muted); min-width: 32px; }
-    .token-row .type { color: var(--accent); font-size: 11px; background: #f0b90b15; padding: 2px 7px; border-radius: 4px; }
-    .token-list-empty { padding: 24px; text-align: center; color: var(--muted); font-size: 13px; }
+    .tl-status.idle    { background: #ffffff08; color: var(--muted); border: 1px solid var(--border); }
+    .tl-status.pending { background: #f0a30b18; color: var(--warn);  border: 1px solid #f0a30b44; }
+    .tl-status.ready   { background: #42b88318; color: var(--ok);    border: 1px solid #42b88344; }
+    .tl-btn-row { display: flex; gap: 8px; margin-top: 8px; }
+    .tl-btn-row .btn { flex: 1; justify-content: center; margin-top: 0; }
 
-    /* ── Loading spinner ────────────────────────────────────────────── */
-    .spinner {
-      width: 14px; height: 14px;
-      border: 2px solid currentColor;
-      border-top-color: transparent;
-      border-radius: 50%;
-      animation: spin .7s linear infinite;
-      display: inline-block;
-    }
-    @keyframes spin { to { transform: rotate(360deg); } }
-
-    /* ── Owner-only overlay ─────────────────────────────────────────── */
-    .owner-only-overlay {
-      position: relative;
-    }
+    /* ── Owner-only overlay (visual only — not a security control) ──── */
+    .owner-only-overlay { position: relative; }
     .owner-only-overlay::after {
       content: '🔒 Owner only';
-      position: absolute;
-      inset: 0;
+      position: absolute; inset: 0;
       background: #0d0d0fcc;
       display: flex;
       align-items: center;
@@ -310,7 +213,44 @@
     .owner-only-overlay.unlocked::after { display: none; }
     .owner-only-overlay.unlocked { pointer-events: auto; }
 
-    /* ── Misc ───────────────────────────────────────────────────────── */
+    /* ── Registry table ───────────────────────────────────────────────── */
+    .registry { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+    .registry-search { display: flex; gap: 10px; padding: 14px 16px; border-bottom: 1px solid var(--border); }
+    .registry-search input {
+      flex: 1;
+      background: var(--bg); border: 1px solid var(--border); border-radius: 7px;
+      color: var(--text); padding: 7px 10px; font-size: 13px; font-family: monospace;
+    }
+    .registry-search input:focus { outline: none; border-color: var(--accent); }
+    .token-list { padding: 6px 0; max-height: 280px; overflow-y: auto; }
+    .token-row {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 8px 16px; font-size: 12px; font-family: monospace;
+      border-bottom: 1px solid var(--border); gap: 10px;
+    }
+    .token-row:last-child { border-bottom: none; }
+    .token-row:hover { background: #ffffff06; }
+    .token-row .addr { color: var(--text); }
+    .token-row .idx  { color: var(--muted); min-width: 32px; }
+    .token-row .type { color: var(--accent); font-size: 11px; background: #f0b90b15; padding: 2px 7px; border-radius: 4px; }
+    .token-list-empty { padding: 24px; text-align: center; color: var(--muted); font-size: 13px; }
+
+    /* ── Spinner ─────────────────────────────────────────────────────── */
+    .spinner { width: 14px; height: 14px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; animation: spin .7s linear infinite; display: inline-block; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── RPC note ────────────────────────────────────────────────────── */
+    .rpc-note {
+      font-size: 12px; color: var(--muted); background: var(--surface);
+      border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 10px 14px; margin-bottom: 14px;
+    }
+    .rpc-note input {
+      background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+      color: var(--text); padding: 5px 9px; font-size: 12px; font-family: monospace;
+      width: 100%; margin-top: 6px;
+    }
+
     a { color: var(--accent); text-decoration: none; }
     a:hover { text-decoration: underline; }
     hr.divider { border: none; border-top: 1px solid var(--border); margin: 8px 0; }
@@ -330,18 +270,13 @@
     </div>
   </header>
 
-  <!-- TWAP status bar -->
-  <div class="twap-bar" id="twapBar" style="display:none">
-    <div class="item">TWAP Price: <strong id="twapPrice">—</strong></div>
-    <div class="sep">|</div>
-    <div class="item">Last Success Block: <strong id="twapBlock">—</strong></div>
-    <div class="sep">|</div>
-    <div class="item">Age: <strong id="twapAge" style="color:var(--ok)">—</strong></div>
-    <div class="sep">|</div>
-    <div class="item">Max Age: <strong id="twapMaxAge">—</strong> blocks</div>
-    <div style="margin-left:auto">
-      <button class="btn small" id="twapUpdateBtn">Update TWAP</button>
-    </div>
+  <!-- RPC config (shown when no wallet) -->
+  <div class="rpc-note" id="rpcNote">
+    <strong>No wallet detected.</strong>
+    Using read-only RPC for loading factory state.
+    Connect MetaMask to enable write actions.
+    <input id="rpcInput" type="text" value="https://bsc-dataseed.binance.org"
+           placeholder="https://bsc-dataseed.binance.org" spellcheck="false" />
   </div>
 
   <!-- Overview stats -->
@@ -353,28 +288,32 @@
         <div class="value mono-sm" id="statOwner">—</div>
       </div>
       <div class="stat-card">
-        <div class="label">Fee Recipient</div>
-        <div class="value mono-sm" id="statFeeRecipient">—</div>
+        <div class="label">Pending Owner</div>
+        <div class="value mono-sm" id="statPendingOwner">—</div>
       </div>
       <div class="stat-card">
         <div class="label">Router</div>
         <div class="value mono-sm" id="statRouter">—</div>
       </div>
       <div class="stat-card">
-        <div class="label">Trade Fee</div>
-        <div class="value accent" id="statTradeFee">—</div>
+        <div class="label">Fee Recipient</div>
+        <div class="value mono-sm" id="statFeeRecipient">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Charity Wallet</div>
+        <div class="value mono-sm" id="statCharityWallet">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Platform Fee</div>
+        <div class="value accent" id="statPlatformFee">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Charity Fee</div>
+        <div class="value accent" id="statCharityFee">—</div>
       </div>
       <div class="stat-card">
         <div class="label">Creation Fee</div>
         <div class="value accent" id="statCreationFee">—</div>
-      </div>
-      <div class="stat-card">
-        <div class="label">Accumulated Fees</div>
-        <div class="value ok" id="statFees">—</div>
-      </div>
-      <div class="stat-card">
-        <div class="label">Total Tokens Launched</div>
-        <div class="value accent" id="statTotal">—</div>
       </div>
       <div class="stat-card">
         <div class="label">Default Virtual BNB</div>
@@ -385,12 +324,8 @@
         <div class="value" id="statMigTarget">—</div>
       </div>
       <div class="stat-card">
-        <div class="label">USDC Token</div>
-        <div class="value mono-sm" id="statUsdc">—</div>
-      </div>
-      <div class="stat-card">
-        <div class="label">USDC/WBNB Pair</div>
-        <div class="value mono-sm" id="statPair">—</div>
+        <div class="label">Total Tokens Launched</div>
+        <div class="value accent" id="statTotal">—</div>
       </div>
       <div class="stat-card">
         <div class="label">Implementations</div>
@@ -403,96 +338,170 @@
     </div>
   </div>
 
+  <!-- Timelock Pending Actions -->
+  <div id="timelockSection" style="display:none">
+    <div class="section-title">Timelock Status</div>
+    <div class="stat-grid" id="timelockGrid">
+      <!-- populated by renderTimelocks() -->
+    </div>
+  </div>
+
   <!-- Owner Actions -->
   <div id="adminSection" style="display:none">
     <div class="section-title">Owner Actions</div>
     <div class="action-grid">
 
-      <!-- Set Router -->
-      <div class="action-card owner-only-overlay" id="cardRouter">
-        <h3>Update Router</h3>
-        <div class="desc">Change the PancakeSwap V2 router used for migration.</div>
-        <div class="field"><label>New Router Address</label><input id="inRouter" type="text" placeholder="0x…" /></div>
-        <button class="btn" onclick="exec('setRouter', [get('inRouter')])">Set Router</button>
-      </div>
-
-      <!-- Set Fee Recipient -->
-      <div class="action-card owner-only-overlay" id="cardFeeRec">
-        <h3>Update Fee Recipient</h3>
-        <div class="desc">Address that accumulates platform fees (creation + trade).</div>
-        <div class="field"><label>New Recipient Address</label><input id="inFeeRec" type="text" placeholder="0x…" /></div>
-        <button class="btn" onclick="exec('setFeeRecipient', [get('inFeeRec')])">Set Fee Recipient</button>
-      </div>
-
-      <!-- Set Trade Fee -->
-      <div class="action-card owner-only-overlay" id="cardTradeFee">
-        <h3>Update Trade Fee</h3>
-        <div class="desc">Fee on each buy/sell (in BPS, max 500 = 5 %). Default: 100 (1 %).</div>
-        <div class="field">
-          <label>Fee (BPS)</label>
-          <input id="inTradeFee" type="number" placeholder="100" min="0" max="500" />
-        </div>
-        <button class="btn" onclick="exec('setTradeFee', [BigInt(get('inTradeFee'))])">Set Trade Fee</button>
-      </div>
-
-      <!-- Set Creation Fee USD -->
+      <!-- Set Creation Fee (instant) -->
       <div class="action-card owner-only-overlay" id="cardCreFee">
-        <h3>Update Creation Fee</h3>
-        <div class="desc">Fee charged to launch a new token, denominated in USD (18-dec). Default: $1.</div>
-        <div class="field"><label>Amount in USD</label><input id="inCreFeeUSD" type="number" placeholder="1" step="0.01" min="0.01" /></div>
-        <button class="btn" onclick="execCreationFee()">Set Creation Fee</button>
-      </div>
-
-      <!-- Set USDC Pair -->
-      <div class="action-card owner-only-overlay" id="cardUsdcPair">
-        <h3>Update USDC Oracle Pair</h3>
-        <div class="desc">Swap the TWAP oracle pair. <code>isToken0</code> is derived on-chain. Resets TWAP state.</div>
-        <div class="field"><label>USDC Token Address</label><input id="inUsdcToken" type="text" placeholder="0x…" /></div>
-        <div class="field"><label>USDC/WBNB Pair Address</label><input id="inUsdcPair" type="text" placeholder="0x…" /></div>
+        <h3>Creation Fee</h3>
+        <div class="desc">Flat fee charged in BNB when launching a new token.</div>
         <div class="field">
-          <label>USDC Decimals</label>
-          <select id="inUsdcDec">
-            <option value="6">6 — Circle USDC</option>
-            <option value="18">18 — Binance-peg BUSD/USDT</option>
-          </select>
+          <label>Fee (BNB)</label>
+          <input id="inCreFee" type="number" placeholder="0.0011" step="0.0001" min="0" />
         </div>
-        <button class="btn" onclick="exec('setUsdcPair', [get('inUsdcToken'), get('inUsdcPair'), parseInt(get('inUsdcDec'))])">Set USDC Pair</button>
+        <button class="btn full" onclick="execCreationFee()">Set Creation Fee</button>
       </div>
 
-      <!-- Set TWAP Max Age -->
-      <div class="action-card owner-only-overlay" id="cardTwapAge">
-        <h3>TWAP Max Age (Blocks)</h3>
-        <div class="desc">Max blocks since last successful TWAP refresh before it's considered stale. Default: 1440 (~2 h).</div>
-        <div class="field"><label>Blocks (min 60)</label><input id="inTwapAge" type="number" placeholder="1440" min="60" /></div>
-        <button class="btn" onclick="exec('setTwapMaxAgeBlocks', [BigInt(get('inTwapAge'))])">Set Max Age</button>
-      </div>
-
-      <!-- Set Default Params -->
+      <!-- Set Default Params (instant, onlyOwnerOrManager) -->
       <div class="action-card owner-only-overlay" id="cardDefaults">
         <h3>Default Bonding-Curve Params</h3>
-        <div class="desc">Virtual BNB and migration target used when a token creator doesn't override them.</div>
-        <div class="field"><label>Virtual BNB USD ($)</label><input id="inVBNB" type="number" placeholder="2000" step="1" /></div>
-        <div class="field"><label>Migration Target USD ($)</label><input id="inMigTarget" type="number" placeholder="11000" step="1" /></div>
-        <button class="btn" onclick="execDefaultParams()">Set Defaults</button>
+        <div class="desc">Virtual BNB seed and BNB raise target for new launches. Managers may also update this.</div>
+        <div class="field"><label>Virtual BNB (BNB)</label><input id="inVBNB" type="number" placeholder="e.g. 5" step="0.01" /></div>
+        <div class="field"><label>Migration Target (BNB)</label><input id="inMigTarget" type="number" placeholder="e.g. 30" step="0.1" /></div>
+        <button class="btn full" onclick="execDefaultParams()">Set Defaults</button>
       </div>
 
-      <!-- Withdraw Fees -->
-      <div class="action-card owner-only-overlay" id="cardWithdraw">
-        <h3>Withdraw Accumulated Fees</h3>
-        <div class="desc">Push all collected BNB fees to the current fee recipient.</div>
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
-          <span style="color:var(--muted);font-size:12px">Available:</span>
-          <span style="color:var(--ok);font-weight:700;font-size:15px" id="withdrawBal">— BNB</span>
+      <!-- Platform Fee — timelocked -->
+      <div class="action-card owner-only-overlay" id="cardPlatformFee">
+        <div class="card-title-row">
+          <h3>Platform Fee</h3>
+          <span class="badge timelock">48h Timelock</span>
         </div>
-        <button class="btn ok" style="background:var(--ok);color:#0d0d0f" onclick="exec('withdrawFees', [])">Withdraw Fees</button>
+        <div class="desc">BPS sent to feeRecipient on each trade. Combined with charity fee, max total 2.5%.</div>
+        <div class="field">
+          <label>Fee (BPS, max 250)</label>
+          <input id="inPlatformFee" type="number" placeholder="100" min="0" max="250" />
+        </div>
+        <button class="btn full" onclick="tlPropose('SET_PLATFORM_FEE', 'proposeSetPlatformFee', [BigInt(Number(get('inPlatformFee')))])">Propose</button>
+        <div class="tl-status idle" id="tlsPlatformFee">Not queued</div>
+        <div class="tl-btn-row">
+          <button class="btn ok small" id="tlExecPlatformFee" disabled onclick="exec('executeSetPlatformFee', [])">Execute</button>
+          <button class="btn danger small" onclick="tlCancel('SET_PLATFORM_FEE')">Cancel</button>
+        </div>
       </div>
 
-      <!-- Transfer Ownership -->
+      <!-- Charity Fee — timelocked -->
+      <div class="action-card owner-only-overlay" id="cardCharityFee">
+        <div class="card-title-row">
+          <h3>Charity Fee</h3>
+          <span class="badge timelock">48h Timelock</span>
+        </div>
+        <div class="desc">BPS sent to charityWallet on each trade.</div>
+        <div class="field">
+          <label>Fee (BPS, max 250)</label>
+          <input id="inCharityFee" type="number" placeholder="0" min="0" max="250" />
+        </div>
+        <button class="btn full" onclick="tlPropose('SET_CHARITY_FEE', 'proposeSetCharityFee', [BigInt(Number(get('inCharityFee')))])">Propose</button>
+        <div class="tl-status idle" id="tlsCharityFee">Not queued</div>
+        <div class="tl-btn-row">
+          <button class="btn ok small" id="tlExecCharityFee" disabled onclick="exec('executeSetCharityFee', [])">Execute</button>
+          <button class="btn danger small" onclick="tlCancel('SET_CHARITY_FEE')">Cancel</button>
+        </div>
+      </div>
+
+      <!-- Fee Recipient — timelocked -->
+      <div class="action-card owner-only-overlay" id="cardFeeRec">
+        <div class="card-title-row">
+          <h3>Fee Recipient</h3>
+          <span class="badge timelock">48h Timelock</span>
+        </div>
+        <div class="desc">EOA that receives the platform portion of trade fees.</div>
+        <div class="field"><label>New Address</label><input id="inFeeRec" type="text" placeholder="0x…" /></div>
+        <button class="btn full" onclick="tlPropose('SET_FEE_RECIPIENT', 'proposeSetFeeRecipient', [get('inFeeRec')])">Propose</button>
+        <div class="tl-status idle" id="tlsFeeRecipient">Not queued</div>
+        <div class="tl-btn-row">
+          <button class="btn ok small" id="tlExecFeeRecipient" disabled onclick="exec('executeSetFeeRecipient', [])">Execute</button>
+          <button class="btn danger small" onclick="tlCancel('SET_FEE_RECIPIENT')">Cancel</button>
+        </div>
+      </div>
+
+      <!-- Charity Wallet — timelocked -->
+      <div class="action-card owner-only-overlay" id="cardCharityWallet">
+        <div class="card-title-row">
+          <h3>Charity Wallet</h3>
+          <span class="badge timelock">48h Timelock</span>
+        </div>
+        <div class="desc">EOA that receives the charity portion. Set to zero address to redirect to feeRecipient.</div>
+        <div class="field"><label>New Address</label><input id="inCharityWallet" type="text" placeholder="0x… or 0x000…0 to disable" /></div>
+        <button class="btn full" onclick="tlPropose('SET_CHARITY_WALLET', 'proposeSetCharityWallet', [get('inCharityWallet')])">Propose</button>
+        <div class="tl-status idle" id="tlsCharityWallet">Not queued</div>
+        <div class="tl-btn-row">
+          <button class="btn ok small" id="tlExecCharityWallet" disabled onclick="exec('executeSetCharityWallet', [])">Execute</button>
+          <button class="btn danger small" onclick="tlCancel('SET_CHARITY_WALLET')">Cancel</button>
+        </div>
+      </div>
+
+      <!-- Router — timelocked -->
+      <div class="action-card owner-only-overlay" id="cardRouter">
+        <div class="card-title-row">
+          <h3>PancakeSwap Router</h3>
+          <span class="badge timelock">48h Timelock</span>
+        </div>
+        <div class="desc">Router used for future migrations only. Existing tokens snapshot the router at creation.</div>
+        <div class="field"><label>New Router Address</label><input id="inRouter" type="text" placeholder="0x…" /></div>
+        <button class="btn full" onclick="tlPropose('SET_ROUTER', 'proposeSetRouter', [get('inRouter')])">Propose</button>
+        <div class="tl-status idle" id="tlsRouter">Not queued</div>
+        <div class="tl-btn-row">
+          <button class="btn ok small" id="tlExecRouter" disabled onclick="exec('executeSetRouter', [])">Execute</button>
+          <button class="btn danger small" onclick="tlCancel('SET_ROUTER')">Cancel</button>
+        </div>
+      </div>
+
+      <!-- Cancel Action -->
+      <div class="action-card owner-only-overlay" id="cardCancel">
+        <h3>Cancel Timelock Action</h3>
+        <div class="desc">Cancel any queued but not yet executed timelock action by its action ID (bytes32).</div>
+        <div class="field"><label>Action ID (bytes32)</label><input id="inCancelId" type="text" placeholder="0x…" /></div>
+        <button class="btn danger full" onclick="exec('cancelAction', [get('inCancelId')])">Cancel Action</button>
+      </div>
+
+      <!-- Add Manager -->
+      <div class="action-card owner-only-overlay" id="cardAddMgr">
+        <h3>Add Manager</h3>
+        <div class="desc">Managers may call setDefaultParams only.</div>
+        <div class="field"><label>Address</label><input id="inAddMgr" type="text" placeholder="0x…" /></div>
+        <button class="btn full" onclick="exec('addManager', [get('inAddMgr')])">Add Manager</button>
+      </div>
+
+      <!-- Remove Manager -->
+      <div class="action-card owner-only-overlay" id="cardRemMgr">
+        <h3>Remove Manager</h3>
+        <div class="desc">Revoke manager role from an address.</div>
+        <div class="field"><label>Address</label><input id="inRemMgr" type="text" placeholder="0x…" /></div>
+        <button class="btn danger full" onclick="exec('removeManager', [get('inRemMgr')])">Remove Manager</button>
+      </div>
+
+      <!-- Transfer Ownership (two-step) -->
       <div class="action-card owner-only-overlay" id="cardOwnership">
-        <h3>Transfer Ownership</h3>
-        <div class="desc">Transfer factory admin rights. <span style="color:var(--danger)">Irreversible.</span></div>
+        <h3>Propose Ownership Transfer</h3>
+        <div class="desc">Two-step. The new owner must call acceptOwnership() to complete transfer. <span style="color:var(--danger)">Not reversible once accepted.</span></div>
         <div class="field"><label>New Owner Address</label><input id="inNewOwner" type="text" placeholder="0x…" /></div>
-        <button class="btn danger" onclick="execTransferOwnership()">Transfer Ownership</button>
+        <button class="btn danger full" onclick="execTransferOwnership()">Propose Transfer</button>
+      </div>
+
+      <!-- Accept Ownership (pending owner only) -->
+      <div class="action-card" id="cardAcceptOwnership" style="display:none">
+        <h3>Accept Ownership</h3>
+        <div class="desc">You are the pending owner. Call acceptOwnership() to complete the transfer.</div>
+        <button class="btn ok full" onclick="exec('acceptOwnership', [])">Accept Ownership</button>
+      </div>
+
+      <!-- Rescue BNB -->
+      <div class="action-card owner-only-overlay" id="cardRescue">
+        <h3>Rescue Stray BNB</h3>
+        <div class="desc">Sends any BNB in the factory not accounted for by active bonding curves to the specified address. Use only in emergencies.</div>
+        <div class="field"><label>Destination Address</label><input id="inRescueTo" type="text" placeholder="0x…" /></div>
+        <button class="btn full" onclick="execRescueBNB()">Rescue BNB</button>
       </div>
 
     </div>
@@ -515,63 +524,85 @@
 
 </div><!-- /shell -->
 
-<!-- Toast -->
 <div id="toast"></div>
 
 <script>
-// ── State ────────────────────────────────────────────────────────────────────
-let provider, signer, signerAddr, contract, readContract;
-let factoryAddr = '';
-let currentBlock = 0;
-
-// ── ABI ──────────────────────────────────────────────────────────────────────
-const ABI = [
-  // Read
-  "function owner() view returns (address)",
-  "function pancakeRouter() view returns (address)",
-  "function feeRecipient() view returns (address)",
-  "function tradeFee() view returns (uint256)",
-  "function creationFeeUSD() view returns (uint256)",
-  "function usdcToken() view returns (address)",
-  "function usdcWbnbPair() view returns (address)",
-  "function usdcIsToken0() view returns (bool)",
-  "function usdcDecimals() view returns (uint8)",
-  "function twapPriceAvg() view returns (uint256)",
-  "function twapLastSuccessBlock() view returns (uint256)",
-  "function twapMaxAgeBlocks() view returns (uint256)",
-  "function accumulatedFees() view returns (uint256)",
-  "function defaultVirtualBNBUSD() view returns (uint256)",
-  "function defaultMigrationTargetUSD() view returns (uint256)",
-  "function totalTokensLaunched() view returns (uint256)",
-  "function standardImpl() view returns (address)",
-  "function taxImpl() view returns (address)",
-  "function reflectionImpl() view returns (address)",
-  "function getTokensByCreator(address) view returns (address[])",
-  "function tokenCountByCreator(address) view returns (uint256)",
-  "function allTokens(uint256) view returns (address)",
-  "function tokens(address) view returns (address,uint8,address,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,bool,uint256,uint256,bool)",
-  // Write
-  "function setRouter(address)",
-  "function setFeeRecipient(address)",
-  "function setTradeFee(uint256)",
-  "function setCreationFeeUSD(uint256)",
-  "function setUsdcPair(address,address,uint8)",
-  "function setTwapMaxAgeBlocks(uint256)",
-  "function setDefaultParams(uint256,uint256)",
-  "function withdrawFees()",
-  "function transferOwnership(address)",
-  "function updateTWAP()",
-];
-
+// ── Constants ─────────────────────────────────────────────────────────────────
 const TOKEN_TYPES = ['STANDARD', 'TAX', 'REFLECTION'];
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
-const get = id => document.getElementById(id).value.trim();
-const el  = id => document.getElementById(id);
+// Timelock action IDs — keccak256(string) matching Solidity's keccak256("NAME")
+// Computed lazily after ethers is loaded.
+let TL_IDS = null;
+function getTLIDs() {
+  if (!TL_IDS) {
+    TL_IDS = {
+      SET_ROUTER:         ethers.id('SET_ROUTER'),
+      SET_PLATFORM_FEE:   ethers.id('SET_PLATFORM_FEE'),
+      SET_CHARITY_FEE:    ethers.id('SET_CHARITY_FEE'),
+      SET_FEE_RECIPIENT:  ethers.id('SET_FEE_RECIPIENT'),
+      SET_CHARITY_WALLET: ethers.id('SET_CHARITY_WALLET'),
+    };
+  }
+  return TL_IDS;
+}
+
+// ── State ─────────────────────────────────────────────────────────────────────
+let provider, signer, signerAddr, contract, readContract;
+let factoryAddr = '';
+let currentTimestamp = 0; // approximate from latest block
+
+// ── ABI ───────────────────────────────────────────────────────────────────────
+const ABI = [
+  // View — factory state
+  'function owner() view returns (address)',
+  'function pendingOwner() view returns (address)',
+  'function pancakeRouter() view returns (address)',
+  'function feeRecipient() view returns (address)',
+  'function charityWallet() view returns (address)',
+  'function platformFee() view returns (uint256)',
+  'function charityFee() view returns (uint256)',
+  'function creationFee() view returns (uint256)',
+  'function defaultVirtualBNB() view returns (uint256)',
+  'function defaultMigrationTarget() view returns (uint256)',
+  'function standardImpl() view returns (address)',
+  'function taxImpl() view returns (address)',
+  'function reflectionImpl() view returns (address)',
+  'function managers(address) view returns (bool)',
+  'function timelockExpiry(bytes32) view returns (uint256)',
+  'function totalTokensLaunched() view returns (uint256)',
+  'function allTokens(uint256) view returns (address)',
+  'function getTokensByCreator(address) view returns (address[])',
+  'function tokens(address) view returns (address,uint8,address,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,address,address,bool,uint256,uint256,bool)',
+  // Write — instant
+  'function setCreationFee(uint256)',
+  'function setDefaultParams(uint256,uint256)',
+  'function addManager(address)',
+  'function removeManager(address)',
+  'function cancelAction(bytes32)',
+  'function rescueBNB(address)',
+  'function transferOwnership(address)',
+  'function acceptOwnership()',
+  // Write — timelocked (propose + execute)
+  'function proposeSetPlatformFee(uint256)',
+  'function executeSetPlatformFee()',
+  'function proposeSetCharityFee(uint256)',
+  'function executeSetCharityFee()',
+  'function proposeSetFeeRecipient(address)',
+  'function executeSetFeeRecipient()',
+  'function proposeSetCharityWallet(address)',
+  'function executeSetCharityWallet()',
+  'function proposeSetRouter(address)',
+  'function executeSetRouter()',
+];
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
+const get  = id => document.getElementById(id).value.trim();
+const el   = id => document.getElementById(id);
+const setText = (id, text) => { el(id).textContent = text; };
 
 function toast(msg, type = 'info', ms = 4500) {
   const t = el('toast');
-  t.textContent = msg;
+  t.textContent = msg; // textContent prevents XSS
   t.className = type;
   t.style.display = 'block';
   clearTimeout(t._to);
@@ -580,35 +611,42 @@ function toast(msg, type = 'info', ms = 4500) {
 
 function short(addr) {
   if (!addr || addr === ethers.ZeroAddress) return '—';
-  return addr.slice(0,8) + '…' + addr.slice(-6);
+  return addr.slice(0, 8) + '…' + addr.slice(-6);
 }
 
-function fmt18(val) {
-  return (Number(val) / 1e18).toLocaleString(undefined, { maximumFractionDigits: 4 });
+function fmtBNB(wei) {
+  return parseFloat(ethers.formatEther(wei)).toLocaleString(undefined, { maximumFractionDigits: 6 }) + ' BNB';
 }
 
-// ── Wallet ────────────────────────────────────────────────────────────────────
+function fmtBPS(bps) {
+  return (Number(bps) / 100).toFixed(2) + '% (' + bps + ' BPS)';
+}
+
+// ── Wallet ─────────────────────────────────────────────────────────────────────
 el('connectBtn').addEventListener('click', async () => {
   if (!window.ethereum) return toast('No wallet detected.', 'err');
   try {
-    provider = new ethers.BrowserProvider(window.ethereum);
+    provider  = new ethers.BrowserProvider(window.ethereum);
     await provider.send('eth_requestAccounts', []);
     signer    = await provider.getSigner();
     signerAddr = await signer.getAddress();
     el('walletBadge').className = 'badge wallet';
-    el('walletBadge').innerHTML = `<span class="dot"></span>${short(signerAddr)}`;
+    el('walletBadge').textContent = '';
+    const dot = document.createElement('span'); dot.className = 'dot';
+    el('walletBadge').append(dot, ' ', short(signerAddr));
     el('connectBtn').textContent = 'Connected';
+    el('rpcNote').style.display = 'none';
     if (factoryAddr) wireContracts();
   } catch(e) { toast(e.message, 'err'); }
 });
 
-// ── Load Factory ──────────────────────────────────────────────────────────────
+// ── Load Factory ───────────────────────────────────────────────────────────────
 el('loadBtn').addEventListener('click', async () => {
   const addr = get('factoryInput');
   if (!ethers.isAddress(addr)) return toast('Enter a valid contract address.', 'err');
   if (!provider) {
-    // read-only fallback — BSC mainnet public RPC
-    provider = new ethers.JsonRpcProvider('https://bsc-dataseed.binance.org');
+    const rpcUrl = get('rpcInput') || 'https://bsc-dataseed.binance.org';
+    provider = new ethers.JsonRpcProvider(rpcUrl);
   }
   factoryAddr = addr;
   wireContracts();
@@ -620,85 +658,101 @@ function wireContracts() {
   if (signer) contract = new ethers.Contract(factoryAddr, ABI, signer);
 }
 
-// ── Load all state ────────────────────────────────────────────────────────────
+// ── Load all state ─────────────────────────────────────────────────────────────
 async function loadAll() {
   toast('Loading factory state…', 'info');
   try {
-    currentBlock = await provider.getBlockNumber();
+    const block = await provider.getBlock('latest');
+    currentTimestamp = block ? Number(block.timestamp) : Math.floor(Date.now() / 1000);
+
+    const ids = getTLIDs();
+
     const [
-      owner, router, feeRec, tradeFee, creFeeUSD,
-      usdcTok, usdcPair, twapAvg, twapBlock, twapMax,
-      accFees, vBNBusd, mTgtusd, total,
+      owner, pendingOwner, router, feeRec, charityWallet,
+      platformFee, charityFee, creationFee,
+      vBNB, migTarget, total,
       implStd, implTax, implRfl,
+      tlRouter, tlPlatform, tlCharity, tlFeeRec, tlCharityWallet,
     ] = await Promise.all([
       readContract.owner(),
+      readContract.pendingOwner(),
       readContract.pancakeRouter(),
       readContract.feeRecipient(),
-      readContract.tradeFee(),
-      readContract.creationFeeUSD(),
-      readContract.usdcToken(),
-      readContract.usdcWbnbPair(),
-      readContract.twapPriceAvg(),
-      readContract.twapLastSuccessBlock(),
-      readContract.twapMaxAgeBlocks(),
-      readContract.accumulatedFees(),
-      readContract.defaultVirtualBNBUSD(),
-      readContract.defaultMigrationTargetUSD(),
+      readContract.charityWallet(),
+      readContract.platformFee(),
+      readContract.charityFee(),
+      readContract.creationFee(),
+      readContract.defaultVirtualBNB(),
+      readContract.defaultMigrationTarget(),
       readContract.totalTokensLaunched(),
       readContract.standardImpl(),
       readContract.taxImpl(),
       readContract.reflectionImpl(),
+      readContract.timelockExpiry(ids.SET_ROUTER),
+      readContract.timelockExpiry(ids.SET_PLATFORM_FEE),
+      readContract.timelockExpiry(ids.SET_CHARITY_FEE),
+      readContract.timelockExpiry(ids.SET_FEE_RECIPIENT),
+      readContract.timelockExpiry(ids.SET_CHARITY_WALLET),
     ]);
 
-    // Stats
-    el('statOwner').textContent = short(owner);
-    el('statOwner').title       = owner;
-    el('statFeeRecipient').textContent = short(feeRec);
-    el('statFeeRecipient').title = feeRec;
-    el('statRouter').textContent = short(router);
-    el('statRouter').title = router;
-    el('statTradeFee').textContent = `${Number(tradeFee) / 100} %  (${tradeFee} BPS)`;
-    el('statCreationFee').textContent = `$${fmt18(creFeeUSD)} USD`;
-    el('statFees').textContent = `${ethers.formatEther(accFees)} BNB`;
-    el('statTotal').textContent = total.toString();
-    el('statVBNB').textContent = `$${fmt18(vBNBusd)}`;
-    el('statMigTarget').textContent = `$${fmt18(mTgtusd)}`;
-    el('statUsdc').textContent = short(usdcTok);
-    el('statUsdc').title = usdcTok;
-    el('statPair').textContent = short(usdcPair);
-    el('statPair').title = usdcPair;
+    // ── Stats ──
+    const setAddr = (id, addr) => {
+      const node = el(id);
+      node.textContent = short(addr);
+      node.title = addr;
+    };
+    setAddr('statOwner', owner);
+    setAddr('statPendingOwner', pendingOwner === ethers.ZeroAddress ? '' : pendingOwner);
+    if (pendingOwner === ethers.ZeroAddress) el('statPendingOwner').textContent = '—';
+    setAddr('statRouter', router);
+    setAddr('statFeeRecipient', feeRec);
+    setAddr('statCharityWallet', charityWallet === ethers.ZeroAddress ? '' : charityWallet);
+    if (charityWallet === ethers.ZeroAddress) el('statCharityWallet').textContent = '— (→ feeRecipient)';
+    setText('statPlatformFee', fmtBPS(platformFee));
+    setText('statCharityFee', fmtBPS(charityFee));
+    setText('statCreationFee', fmtBNB(creationFee));
+    setText('statVBNB', fmtBNB(vBNB));
+    setText('statMigTarget', fmtBNB(migTarget));
+    setText('statTotal', total.toString());
     el('implStd').textContent = short(implStd);
     el('implTax').textContent = short(implTax);
     el('implRfl').textContent = short(implRfl);
-    el('withdrawBal').textContent = `${ethers.formatEther(accFees)} BNB`;
 
-    // TWAP bar
-    const age = currentBlock - Number(twapBlock);
-    const stale = age > Number(twapMax);
-    el('twapPrice').textContent = twapAvg > 0n ? `UQ112 ${twapAvg.toString().slice(0,10)}…` : 'Not initialized';
-    el('twapBlock').textContent = twapBlock.toString();
-    el('twapAge').textContent   = `${age} blocks`;
-    el('twapAge').style.color   = stale ? 'var(--danger)' : 'var(--ok)';
-    el('twapMaxAge').textContent = twapMax.toString();
+    // Pre-fill inputs with current values
+    el('inCreFee').placeholder     = ethers.formatEther(creationFee);
+    el('inVBNB').placeholder       = ethers.formatEther(vBNB);
+    el('inMigTarget').placeholder  = ethers.formatEther(migTarget);
+    el('inPlatformFee').placeholder = platformFee.toString();
+    el('inCharityFee').placeholder  = charityFee.toString();
 
-    // Owner gating
+    // ── Timelocks ──
+    renderTimelockStatus('PlatformFee',   'tlExecPlatformFee',   tlPlatform);
+    renderTimelockStatus('CharityFee',    'tlExecCharityFee',    tlCharity);
+    renderTimelockStatus('FeeRecipient',  'tlExecFeeRecipient',  tlFeeRec);
+    renderTimelockStatus('CharityWallet', 'tlExecCharityWallet', tlCharityWallet);
+    renderTimelockStatus('Router',        'tlExecRouter',        tlRouter);
+
+    renderTimelockGrid([
+      { name: 'Router',        id: ids.SET_ROUTER,         expiry: tlRouter },
+      { name: 'Platform Fee',  id: ids.SET_PLATFORM_FEE,   expiry: tlPlatform },
+      { name: 'Charity Fee',   id: ids.SET_CHARITY_FEE,    expiry: tlCharity },
+      { name: 'Fee Recipient', id: ids.SET_FEE_RECIPIENT,  expiry: tlFeeRec },
+      { name: 'Charity Wallet',id: ids.SET_CHARITY_WALLET, expiry: tlCharityWallet },
+    ]);
+
+    // ── Owner gating (visual only) ──
     const isOwner = signerAddr && owner.toLowerCase() === signerAddr.toLowerCase();
+    const isPending = signerAddr && pendingOwner.toLowerCase() === signerAddr.toLowerCase();
     document.querySelectorAll('.owner-only-overlay').forEach(card => {
       card.classList.toggle('unlocked', isOwner);
     });
+    el('cardAcceptOwnership').style.display = isPending ? '' : 'none';
 
-    // Show sections
-    el('overviewSection').style.display = '';
-    el('adminSection').style.display    = '';
-    el('registrySection').style.display = '';
-    el('twapBar').style.display         = '';
-
-    // Pre-fill defaults
-    el('inTradeFee').placeholder = tradeFee.toString();
-    el('inCreFeeUSD').placeholder = fmt18(creFeeUSD);
-    el('inVBNB').placeholder = fmt18(vBNBusd);
-    el('inMigTarget').placeholder = fmt18(mTgtusd);
-    el('inTwapAge').placeholder = twapMax.toString();
+    // ── Show sections ──
+    el('overviewSection').style.display   = '';
+    el('timelockSection').style.display   = '';
+    el('adminSection').style.display      = '';
+    el('registrySection').style.display   = '';
 
     await loadAllTokens();
     toast('Factory loaded.', 'ok');
@@ -708,15 +762,64 @@ async function loadAll() {
   }
 }
 
-// ── Token Registry ─────────────────────────────────────────────────────────
+// ── Timelock status helpers ────────────────────────────────────────────────────
+function timeLockInfo(expiry) {
+  const exp = Number(expiry);
+  if (exp === 0) return { state: 'idle',    label: 'Not queued' };
+  if (currentTimestamp < exp) {
+    const secs = exp - currentTimestamp;
+    const hrs  = Math.floor(secs / 3600);
+    const mins = Math.floor((secs % 3600) / 60);
+    return { state: 'pending', label: `Queued — ready in ${hrs}h ${mins}m` };
+  }
+  return { state: 'ready', label: 'Ready to execute' };
+}
+
+function renderTimelockStatus(nameSuffix, execBtnId, expiry) {
+  const info = timeLockInfo(expiry);
+  const strip = el('tls' + nameSuffix);
+  strip.className = 'tl-status ' + info.state;
+  strip.textContent = info.label;
+  const execBtn = el(execBtnId);
+  if (execBtn) execBtn.disabled = (info.state !== 'ready');
+}
+
+function renderTimelockGrid(actions) {
+  const grid = el('timelockGrid');
+  grid.innerHTML = '';
+  let anyActive = false;
+  actions.forEach(({ name, id, expiry }) => {
+    const info = timeLockInfo(expiry);
+    if (info.state === 'idle') return;
+    anyActive = true;
+    const card = document.createElement('div');
+    card.className = 'stat-card';
+    const label = document.createElement('div'); label.className = 'label'; label.textContent = name;
+    const value = document.createElement('div');
+    value.className = 'value ' + (info.state === 'ready' ? 'ok' : 'warn');
+    value.textContent = info.label;
+    const sub = document.createElement('div');
+    sub.style.cssText = 'font-size:11px;color:var(--muted);margin-top:4px;font-weight:400;font-family:monospace;word-break:break-all';
+    sub.textContent = id.slice(0, 18) + '…';
+    card.append(label, value, sub);
+    grid.appendChild(card);
+  });
+  el('timelockSection').style.display = anyActive ? '' : 'none';
+}
+
+// ── Token Registry ─────────────────────────────────────────────────────────────
 async function loadAllTokens() {
   const total = await readContract.totalTokensLaunched();
   if (Number(total) === 0) {
-    el('tokenList').innerHTML = '<div class="token-list-empty">No tokens launched yet.</div>';
+    el('tokenList').innerHTML = '';
+    const empty = document.createElement('div');
+    empty.className = 'token-list-empty';
+    empty.textContent = 'No tokens launched yet.';
+    el('tokenList').appendChild(empty);
     return;
   }
-  const count = Math.min(Number(total), 50); // cap for performance
-  const idxs = Array.from({length: count}, (_, i) => Number(total) - 1 - i);
+  const count = Math.min(Number(total), 50);
+  const idxs  = Array.from({ length: count }, (_, i) => Number(total) - 1 - i);
   const addrs = await Promise.all(idxs.map(i => readContract.allTokens(i)));
   renderTokenRows(addrs, idxs);
 }
@@ -726,81 +829,131 @@ async function searchByCreator() {
   if (!ethers.isAddress(addr)) return toast('Enter a valid creator address.', 'err');
   const addrs = await readContract.getTokensByCreator(addr);
   if (addrs.length === 0) {
-    el('tokenList').innerHTML = '<div class="token-list-empty">No tokens found for this creator.</div>';
+    el('tokenList').innerHTML = '';
+    const empty = document.createElement('div');
+    empty.className = 'token-list-empty';
+    empty.textContent = 'No tokens found for this creator.';
+    el('tokenList').appendChild(empty);
     return;
   }
   renderTokenRows([...addrs].reverse(), [...addrs.keys()].reverse());
 }
 
 function renderTokenRows(addrs, indices) {
-  el('tokenList').innerHTML = addrs.map((addr, i) => `
-    <div class="token-row">
-      <span class="idx">#${typeof indices[i] === 'number' ? indices[i] : i}</span>
-      <span class="addr">${addr}</span>
-      <a class="btn small secondary" href="#" onclick="copyAddr('${addr}');return false">Copy</a>
-    </div>
-  `).join('');
+  const list = el('tokenList');
+  list.innerHTML = '';
+  addrs.forEach((addr, i) => {
+    const row = document.createElement('div');
+    row.className = 'token-row';
+
+    const idx = document.createElement('span');
+    idx.className = 'idx';
+    idx.textContent = '#' + (typeof indices[i] === 'number' ? indices[i] : i);
+
+    const addrSpan = document.createElement('span');
+    addrSpan.className = 'addr';
+    addrSpan.textContent = addr; // textContent — no XSS risk
+
+    const copyBtn = document.createElement('button');
+    copyBtn.className = 'btn small secondary';
+    copyBtn.textContent = 'Copy';
+    copyBtn.addEventListener('click', () => copyAddr(addr, copyBtn));
+
+    row.append(idx, addrSpan, copyBtn);
+    list.appendChild(row);
+  });
 }
 
-function copyAddr(addr) {
-  navigator.clipboard.writeText(addr).then(() => toast(`Copied: ${addr}`, 'ok', 2000));
+function copyAddr(addr, btn) {
+  navigator.clipboard.writeText(addr).then(() => {
+    const orig = btn.textContent;
+    btn.textContent = '✓ Copied';
+    setTimeout(() => { btn.textContent = orig; }, 1500);
+  });
 }
 
-// ── TWAP Update ──────────────────────────────────────────────────────────────
-el('twapUpdateBtn').addEventListener('click', () => exec('updateTWAP', []));
-
-// ── Generic Exec ─────────────────────────────────────────────────────────────
+// ── Generic tx exec ────────────────────────────────────────────────────────────
 async function exec(fn, args) {
   if (!contract) return toast('Connect your wallet first.', 'err');
   try {
-    toast(`Sending ${fn}…`, 'info', 99999);
+    toast('Sending ' + fn + '…', 'info', 99999);
     const tx = await contract[fn](...args);
-    toast(`Tx sent: ${tx.hash.slice(0,18)}…`, 'info', 99999);
+    toast('Tx sent: ' + tx.hash.slice(0, 18) + '…', 'info', 99999);
     await tx.wait();
-    toast(`${fn} confirmed!`, 'ok');
+    toast(fn + ' confirmed!', 'ok');
     await loadAll();
   } catch(e) {
     toast(e.reason || e.message, 'err', 8000);
   }
 }
 
+// ── Timelocked actions ─────────────────────────────────────────────────────────
+async function tlPropose(actionName, fnName, args) {
+  // Validate address args
+  for (const arg of args) {
+    if (typeof arg === 'string' && arg.startsWith('0x') && arg.length !== 66) {
+      if (!ethers.isAddress(arg)) return toast('Invalid address: ' + arg, 'err');
+    }
+  }
+  await exec(fnName, args);
+}
+
+async function tlCancel(actionName) {
+  const ids = getTLIDs();
+  const actionId = ids[actionName];
+  if (!actionId) return toast('Unknown action: ' + actionName, 'err');
+  await exec('cancelAction', [actionId]);
+}
+
+// ── Specific exec helpers ──────────────────────────────────────────────────────
 async function execCreationFee() {
-  const v = parseFloat(get('inCreFeeUSD'));
-  if (isNaN(v) || v <= 0) return toast('Enter a valid USD amount.', 'err');
-  const wei = BigInt(Math.round(v * 1e18));
-  await exec('setCreationFeeUSD', [wei]);
+  const v = parseFloat(get('inCreFee'));
+  if (isNaN(v) || v < 0) return toast('Enter a valid BNB amount.', 'err');
+  const wei = ethers.parseEther(v.toString());
+  await exec('setCreationFee', [wei]);
 }
 
 async function execDefaultParams() {
   const v = parseFloat(get('inVBNB'));
   const m = parseFloat(get('inMigTarget'));
-  if (isNaN(v) || v <= 0) return toast('Enter virtual BNB USD.', 'err');
-  if (isNaN(m) || m <= 0) return toast('Enter migration target USD.', 'err');
-  const vWei = BigInt(Math.round(v * 1e18));
-  const mWei = BigInt(Math.round(m * 1e18));
+  if (isNaN(v) || v <= 0) return toast('Enter virtual BNB amount.', 'err');
+  if (isNaN(m) || m <= 0) return toast('Enter migration target BNB.', 'err');
+  const vWei = ethers.parseEther(v.toString());
+  const mWei = ethers.parseEther(m.toString());
   await exec('setDefaultParams', [vWei, mWei]);
+}
+
+async function execRescueBNB() {
+  const addr = get('inRescueTo');
+  if (!ethers.isAddress(addr)) return toast('Enter a valid destination address.', 'err');
+  await exec('rescueBNB', [addr]);
 }
 
 async function execTransferOwnership() {
   const addr = get('inNewOwner');
   if (!ethers.isAddress(addr)) return toast('Enter a valid address.', 'err');
-  const confirmed = window.confirm(`Transfer ownership to ${addr}?\n\nThis is irreversible.`);
+  const confirmed = window.confirm('Propose ownership transfer to ' + addr + '?\n\nThe new owner must accept. This can be cancelled before acceptance.');
   if (!confirmed) return;
   await exec('transferOwnership', [addr]);
 }
 
-// ── Reload on account/chain change ───────────────────────────────────────────
+// ── Wallet events ──────────────────────────────────────────────────────────────
 if (window.ethereum) {
   window.ethereum.on('accountsChanged', async ([acc]) => {
     if (!acc) {
       signerAddr = null;
+      signer = null;
       el('walletBadge').className = 'badge disconnected';
-      el('walletBadge').innerHTML = '<span class="dot"></span>Disconnected';
+      el('walletBadge').textContent = '';
+      const dot = document.createElement('span'); dot.className = 'dot';
+      el('walletBadge').append(dot, ' Disconnected');
       el('connectBtn').textContent = 'Connect Wallet';
     } else {
       signer = await provider.getSigner();
       signerAddr = acc;
-      el('walletBadge').innerHTML = `<span class="dot"></span>${short(acc)}`;
+      el('walletBadge').textContent = '';
+      const dot = document.createElement('span'); dot.className = 'dot';
+      el('walletBadge').append(dot, ' ', short(acc));
       if (factoryAddr) { wireContracts(); loadAll(); }
     }
   });

@@ -334,7 +334,8 @@
     <code>keccak256(abi.encode(creator, userSalt))</code>.
     Mine a <code>userSalt</code> such that the resulting token address ends in
     <code>0x…<strong style="color:var(--accent)">????</strong></code> (your chosen suffix).
-    Pass the found salt in <code>BaseParams.salt</code> when calling
+    Pass the found salt in the <code>salt</code> field of <code>BaseParams</code> (Standard),
+    <code>CreateTTParams</code> (Tax), or <code>CreateRFLParams</code> (Reflection) when calling
     <code>createToken / createTT / createRFL</code>.
     Expected attempts for a 4-hex-digit suffix: <strong>~65 536</strong>.
   </div>
@@ -366,6 +367,12 @@
           <option value="">— select type —</option>
         </select>
       </div>
+    </div>
+
+    <div class="field" style="margin-top:4px">
+      <label>RPC URL (for "Fetch from factory")</label>
+      <input id="cfgRpc" type="text" value="https://bsc-dataseed.binance.org" spellcheck="false"
+             placeholder="https://bsc-dataseed.binance.org" />
     </div>
 
     <div class="config-grid" style="margin-top:4px">
@@ -441,25 +448,14 @@
 
 <script>
 // ── State ────────────────────────────────────────────────────────────────────
-let mining    = false;
-let rafHandle = null;
-let nonce     = 0n;
-let startTime = 0;
-let totalAttempts = 0n;
-let foundCount = 0;
-let lastRateCheck = { time: 0, count: 0n };
-let currentRate = 0;
-let results = [];
-
-// Precomputed per-run
-let factory       = '';
-let creator       = '';
-let impl          = '';
-let suffix        = '';
-let initcodeHash  = '';
-let continueAfter = false;
-
-const CHUNK_SIZE = 800; // iterations per animation frame
+let miningWorker = null;
+let startTime    = 0;
+let totalAttempts = 0;
+let foundCount   = 0;
+let lastRateCheck = { time: 0, count: 0 };
+let currentRate  = 0;
+let currentSuffix = '';
+let results      = [];
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 const el  = id => document.getElementById(id);
@@ -474,7 +470,6 @@ function toast(msg, ms = 2000) {
 }
 
 function fmtNum(n) {
-  if (typeof n === 'bigint') n = Number(n);
   if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
   if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
   if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
@@ -487,13 +482,6 @@ function fmtTime(ms) {
   return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
 }
 
-function highlightSuffix(addr, sfx) {
-  const lower = addr.toLowerCase();
-  const end   = lower.slice(-sfx.length);
-  const rest  = lower.slice(0, -sfx.length);
-  return `<span>${rest}</span><span class="addr-end">${end}</span>`;
-}
-
 // ── Suffix preview ────────────────────────────────────────────────────────────
 function updateSuffixPreview() {
   const sfx = get('cfgSuffix').replace(/[^0-9a-fA-F]/g, '').toLowerCase();
@@ -503,38 +491,19 @@ function updateSuffixPreview() {
     return;
   }
   const expected = Math.round(Math.pow(16, sfx.length));
+  // sfx is already sanitised to [0-9a-f] — safe to insert into innerHTML
   el('suffixPreview').innerHTML =
     `Address will end in: <span style="color:var(--muted)">0x…</span><span class="match">${sfx}</span>` +
     `  <span style="color:var(--muted);font-size:11px">~${fmtNum(expected)} attempts expected</span>`;
 }
 
-// ── Initcode hash ─────────────────────────────────────────────────────────────
-function computeInitcodeHash(implAddr) {
-  // EIP-1167 initcode: 10-byte deploy prefix + 20-byte impl + 15-byte suffix
-  const implHex = implAddr.slice(2).padStart(40, '0').toLowerCase();
-  const bytecode =
-    '0x3d602d80600a3d3981f3363d3d373d3d3d363d73' +
-    implHex +
-    '5af43d82803e903d91602b57fd5bf3';
-  return ethers.keccak256(bytecode);
-}
-
-// ── Predict one address ───────────────────────────────────────────────────────
-function predict(nonceVal) {
-  const userSalt    = ethers.zeroPadValue(ethers.toBeHex(nonceVal), 32);
-  const derivedSalt = ethers.keccak256(
-    ethers.AbiCoder.defaultAbiCoder().encode(['address', 'bytes32'], [creator, userSalt])
-  );
-  const addr = ethers.getCreate2Address(factory, derivedSalt, initcodeHash);
-  return { addr: addr.toLowerCase(), userSalt, derivedSalt };
-}
-
 // ── Fetch impls from factory ──────────────────────────────────────────────────
 async function fetchImpls() {
   const f = get('cfgFactory');
-  if (!ethers.isAddress(f)) { alert('Enter a valid factory address first.'); return; }
+  if (!ethers.isAddress(f)) { toast('Enter a valid factory address first.', 3000); return; }
+  const rpcUrl = get('cfgRpc') || 'https://bsc-dataseed.binance.org';
   try {
-    const rpc = new ethers.JsonRpcProvider('https://bsc-dataseed.binance.org');
+    const rpc = new ethers.JsonRpcProvider(rpcUrl);
     const mini = new ethers.Contract(f, [
       'function standardImpl() view returns (address)',
       'function taxImpl() view returns (address)',
@@ -542,15 +511,21 @@ async function fetchImpls() {
     ], rpc);
     const [s, t, r] = await Promise.all([mini.standardImpl(), mini.taxImpl(), mini.reflectionImpl()]);
     const sel = el('implSelect');
-    sel.innerHTML = `
-      <option value="">— select type —</option>
-      <option value="${s}">StandardToken — ${s.slice(0,10)}…</option>
-      <option value="${t}">TaxToken      — ${t.slice(0,10)}…</option>
-      <option value="${r}">ReflectionToken — ${r.slice(0,10)}…</option>
-    `;
+    sel.innerHTML = '';
+    [
+      ['', '— select type —'],
+      [s, 'StandardToken — ' + s.slice(0, 10) + '…'],
+      [t, 'TaxToken — '      + t.slice(0, 10) + '…'],
+      [r, 'ReflectionToken — ' + r.slice(0, 10) + '…'],
+    ].forEach(([val, label]) => {
+      const opt = document.createElement('option');
+      opt.value = val;
+      opt.textContent = label; // textContent prevents XSS from contract-returned addresses
+      sel.appendChild(opt);
+    });
     el('implPicker').style.display = 'block';
     toast('Implementations fetched.');
-  } catch(e) { alert('Fetch failed: ' + e.message); }
+  } catch(e) { toast('Fetch failed: ' + e.message, 5000); }
 }
 
 function selectImpl() {
@@ -561,96 +536,144 @@ function selectImpl() {
 // ── Validation ────────────────────────────────────────────────────────────────
 function validate() {
   let ok = true;
-
   const fields = [
-    { id: 'cfgFactory', check: v => ethers.isAddress(v), msg: 'Invalid factory address' },
-    { id: 'cfgCreator', check: v => ethers.isAddress(v), msg: 'Invalid creator address' },
-    { id: 'cfgImpl',    check: v => ethers.isAddress(v), msg: 'Invalid implementation address' },
-    { id: 'cfgSuffix',  check: v => /^[0-9a-fA-F]{1,8}$/.test(v), msg: 'Suffix must be 1–8 hex chars' },
+    { id: 'cfgFactory', check: v => ethers.isAddress(v) },
+    { id: 'cfgCreator', check: v => ethers.isAddress(v) },
+    { id: 'cfgImpl',    check: v => ethers.isAddress(v) },
+    { id: 'cfgSuffix',  check: v => /^[0-9a-fA-F]{1,8}$/.test(v) },
   ];
-
   fields.forEach(f => {
     const input = el(f.id);
-    if (!f.check(get(f.id))) {
-      input.classList.add('error');
-      ok = false;
-    } else {
-      input.classList.remove('error');
-    }
+    if (!f.check(get(f.id))) { input.classList.add('error'); ok = false; }
+    else                     { input.classList.remove('error'); }
   });
-
   if (!ok) return false;
-
-  // Warn if suffix is very long (high search space)
   const sfx = get('cfgSuffix').toLowerCase();
   if (sfx.length > 6) {
     const expected = Math.round(Math.pow(16, sfx.length));
-    const confirmed = window.confirm(
-      `A ${sfx.length}-char suffix requires ~${fmtNum(expected)} attempts on average.\n` +
-      `This could take a very long time. Continue?`
-    );
-    if (!confirmed) return false;
+    if (!window.confirm(`A ${sfx.length}-char suffix requires ~${fmtNum(expected)} attempts on average.\nThis could take a very long time. Continue?`))
+      return false;
   }
-
   return true;
 }
 
-// ── Mining loop ───────────────────────────────────────────────────────────────
+// ── Web Worker source ─────────────────────────────────────────────────────────
+// The worker runs the hash loop off the main thread, posting progress and found messages.
+// It uses importScripts to load ethers.js (same CDN as the main page).
+const WORKER_SRC = `
+importScripts('https://cdn.jsdelivr.net/npm/ethers@6.13.4/dist/ethers.umd.min.js');
+
+const CHUNK = 3000;
+let running = false;
+
+function computeInitcodeHash(implAddr) {
+  const hex = implAddr.slice(2).padStart(40, '0').toLowerCase();
+  return ethers.keccak256(
+    '0x3d602d80600a3d3981f3363d3d373d3d3d363d73' + hex + '5af43d82803e903d91602b57fd5bf3'
+  );
+}
+
+function predict(factory, creator, initcodeHash, nonceVal) {
+  const userSalt    = ethers.zeroPadValue(ethers.toBeHex(nonceVal), 32);
+  const derivedSalt = ethers.keccak256(
+    ethers.AbiCoder.defaultAbiCoder().encode(['address', 'bytes32'], [creator, userSalt])
+  );
+  const addr = ethers.getCreate2Address(factory, derivedSalt, initcodeHash);
+  return { addr: addr.toLowerCase(), userSalt, derivedSalt };
+}
+
+self.onmessage = function(e) {
+  if (e.data.type === 'stop') { running = false; return; }
+  if (e.data.type !== 'start') return;
+
+  const { factory, creator, impl, suffix, startNonce, continueAfter } = e.data;
+  const initcodeHash = computeInitcodeHash(impl);
+  let nonce = BigInt(startNonce || '0');
+  running = true;
+
+  function mineChunk() {
+    if (!running) { self.postMessage({ type: 'stopped', nonce: nonce.toString() }); return; }
+    for (let i = 0; i < CHUNK; i++) {
+      const result = predict(factory, creator, initcodeHash, nonce);
+      if (result.addr.endsWith(suffix)) {
+        self.postMessage({ type: 'found', ...result, nonce: nonce.toString() });
+        if (!continueAfter) { running = false; self.postMessage({ type: 'done', nonce: nonce.toString() }); return; }
+      }
+      nonce++;
+    }
+    self.postMessage({ type: 'progress', attempts: CHUNK, nonce: nonce.toString() });
+    setTimeout(mineChunk, 0);
+  }
+  mineChunk();
+};
+`;
+
+// ── Mining control ────────────────────────────────────────────────────────────
 function startMining() {
-  if (mining) return;
+  if (miningWorker) return;
   if (!validate()) return;
 
-  factory       = get('cfgFactory');
-  creator       = get('cfgCreator');
-  impl          = get('cfgImpl');
-  suffix        = get('cfgSuffix').toLowerCase();
-  continueAfter = el('cfgContinue').checked;
+  currentSuffix  = get('cfgSuffix').toLowerCase();
+  startTime      = performance.now();
+  totalAttempts  = 0;
+  lastRateCheck  = { time: startTime, count: 0 };
+  currentRate    = 0;
 
-  const startNonce = get('cfgNonce').trim();
-  nonce = startNonce ? BigInt(startNonce) : 0n;
+  const blob   = new Blob([WORKER_SRC], { type: 'application/javascript' });
+  const workerUrl = URL.createObjectURL(blob);
+  miningWorker = new Worker(workerUrl);
+  URL.revokeObjectURL(workerUrl); // safe to revoke after Worker is created
 
-  try { initcodeHash = computeInitcodeHash(impl); }
-  catch(e) { alert('Failed to compute initcode hash: ' + e.message); return; }
+  miningWorker.onmessage = handleWorkerMessage;
+  miningWorker.onerror   = e => { toast('Worker error: ' + e.message, 6000); stopMining(); };
 
-  mining        = true;
-  startTime     = performance.now();
-  totalAttempts = 0n;
-  lastRateCheck = { time: startTime, count: 0n };
-  currentRate   = 0;
+  miningWorker.postMessage({
+    type: 'start',
+    factory:       get('cfgFactory'),
+    creator:       get('cfgCreator'),
+    impl:          get('cfgImpl'),
+    suffix:        currentSuffix,
+    startNonce:    get('cfgNonce') || '0',
+    continueAfter: el('cfgContinue').checked,
+  });
 
   setStatus('mining');
   el('startBtn').disabled = true;
   el('stopBtn').disabled  = false;
 
-  rafHandle = requestAnimationFrame(mineChunk);
+  // Stats refresh on main thread (independent of worker)
+  statsInterval = setInterval(updateStats, 300);
 }
 
+let statsInterval = null;
+let lastReportedNonce = '0';
+
 function stopMining() {
-  mining = false;
-  if (rafHandle) { cancelAnimationFrame(rafHandle); rafHandle = null; }
+  if (miningWorker) {
+    miningWorker.postMessage({ type: 'stop' });
+    miningWorker.terminate();
+    miningWorker = null;
+  }
+  clearInterval(statsInterval);
   setStatus(foundCount > 0 ? 'found' : 'idle');
   el('startBtn').disabled = false;
   el('stopBtn').disabled  = true;
-  if (nonce > 0n) el('cfgNonce').value = nonce.toString();
+  if (lastReportedNonce !== '0') el('cfgNonce').value = lastReportedNonce;
 }
 
-function mineChunk() {
-  if (!mining) return;
-
-  for (let i = 0; i < CHUNK_SIZE; i++) {
-    const { addr, userSalt, derivedSalt } = predict(nonce);
-
-    if (addr.endsWith(suffix)) {
-      addResult({ addr, userSalt, derivedSalt, nonce: nonce.toString() });
-      if (!continueAfter) { stopMining(); return; }
-    }
-
-    nonce++;
+function handleWorkerMessage(e) {
+  const msg = e.data;
+  if (msg.type === 'progress') {
+    totalAttempts += msg.attempts;
+    lastReportedNonce = msg.nonce;
+  } else if (msg.type === 'found') {
     totalAttempts++;
+    lastReportedNonce = msg.nonce;
+    addResult({ addr: msg.addr, userSalt: msg.userSalt, derivedSalt: msg.derivedSalt, nonce: msg.nonce });
+  } else if (msg.type === 'done' || msg.type === 'stopped') {
+    lastReportedNonce = msg.nonce;
+    stopMining();
   }
-
-  updateStats();
-  rafHandle = requestAnimationFrame(mineChunk);
 }
 
 // ── Stats ─────────────────────────────────────────────────────────────────────
@@ -659,32 +682,35 @@ function updateStats() {
   const dt  = (now - lastRateCheck.time) / 1000;
   if (dt >= 0.5) {
     const delta = totalAttempts - lastRateCheck.count;
-    currentRate = Math.round(Number(delta) / dt);
+    currentRate = Math.round(delta / dt);
     lastRateCheck = { time: now, count: totalAttempts };
   }
-
-  const expected = Math.pow(16, suffix.length);
-  const pct = Math.min(99.9, (Number(totalAttempts) / expected) * 100);
-
+  const expected = Math.pow(16, currentSuffix.length || 4);
+  const pct = Math.min(99.9, (totalAttempts / expected) * 100);
   el('statAttempts').textContent = fmtNum(totalAttempts);
   el('statSpeed').textContent    = fmtNum(currentRate) + '/s';
   el('statElapsed').textContent  = fmtTime(performance.now() - startTime);
   el('statFound').textContent    = foundCount.toString();
   el('progressFill').style.width = pct.toFixed(1) + '%';
   el('progressPct').textContent  = pct.toFixed(1) + '%';
-  el('progressText').textContent = `~${fmtNum(Math.round(expected))} expected for ${suffix.length}-char suffix`;
+  el('progressText').textContent = `~${fmtNum(Math.round(expected))} expected for ${currentSuffix.length}-char suffix`;
 }
 
 function setStatus(s) {
-  const dot   = el('statusDot');
-  const label = el('statusLabel');
-  dot.className = 'status-dot ' + s;
-  if (s === 'mining') { label.textContent = 'Mining…'; }
-  else if (s === 'found') { label.textContent = 'Done — address found'; }
-  else { label.textContent = 'Idle'; }
+  el('statusDot').className = 'status-dot ' + s;
+  el('statusLabel').textContent =
+    s === 'mining' ? 'Mining…' : s === 'found' ? 'Done — address found' : 'Idle';
 }
 
 // ── Results ───────────────────────────────────────────────────────────────────
+function makeCopyBtn(text) {
+  const btn = document.createElement('button');
+  btn.className = 'copy-btn';
+  btn.textContent = 'Copy';
+  btn.addEventListener('click', () => copy(text, btn));
+  return btn;
+}
+
 function addResult({ addr, userSalt, derivedSalt, nonce: n }) {
   foundCount++;
   results.push({ addr, userSalt, derivedSalt, nonce: n });
@@ -694,36 +720,68 @@ function addResult({ addr, userSalt, derivedSalt, nonce: n }) {
 
   const item = document.createElement('div');
   item.className = 'result-item';
-  item.innerHTML = `
-    <div class="result-header">
-      <span class="result-badge">✓ Match #${foundCount}</span>
-      <span style="color:var(--muted);font-size:12px">Nonce: ${n}</span>
-    </div>
-    <div class="result-grid">
-      <span class="result-key">Token Address</span>
-      <span class="result-val">
-        <span>${highlightSuffix(addr, suffix)}</span>
-        <button class="copy-btn" onclick="copy('${addr}', this)">Copy</button>
-      </span>
 
-      <span class="result-key">User Salt (bytes32)</span>
-      <span class="result-val">
-        <span style="font-size:11px">${userSalt}</span>
-        <button class="copy-btn" onclick="copy('${userSalt}', this)">Copy</button>
-      </span>
+  // Header row
+  const header = document.createElement('div');
+  header.className = 'result-header';
+  const badge = document.createElement('span');
+  badge.className = 'result-badge';
+  badge.textContent = '✓ Match #' + foundCount;
+  const nonceLabel = document.createElement('span');
+  nonceLabel.style.cssText = 'color:var(--muted);font-size:12px';
+  nonceLabel.textContent = 'Nonce: ' + n;
+  header.append(badge, nonceLabel);
 
-      <span class="result-key">Derived Salt (keccak)</span>
-      <span class="result-val">
-        <span style="font-size:11px;color:var(--muted)">${derivedSalt}</span>
-        <button class="copy-btn" onclick="copy('${derivedSalt}', this)">Copy</button>
-      </span>
-    </div>
-    <div style="margin-top:12px;padding:10px 12px;background:var(--surface2);border-radius:7px;font-size:12px;color:var(--muted)">
-      Pass <code style="background:#ffffff10;padding:1px 5px;border-radius:4px;color:var(--text)">salt: "${userSalt}"</code>
-      in <strong style="color:var(--text)">BaseParams</strong> when calling
-      <code style="background:#ffffff10;padding:1px 5px;border-radius:4px;color:var(--text)">createToken / createTT / createRFL</code>.
-    </div>
-  `;
+  // Grid
+  const grid = document.createElement('div');
+  grid.className = 'result-grid';
+
+  function addRow(keyText, valNode) {
+    const k = document.createElement('span'); k.className = 'result-key'; k.textContent = keyText;
+    const v = document.createElement('span'); v.className = 'result-val'; v.appendChild(valNode);
+    v.appendChild(makeCopyBtn(valNode._copyText || valNode.textContent));
+    grid.append(k, v);
+  }
+
+  // Address row with highlighted suffix
+  const addrSpan = document.createElement('span');
+  const lower = addr.toLowerCase();
+  const rest = document.createElement('span'); rest.textContent = lower.slice(0, -suffix.length);
+  const end  = document.createElement('span'); end.className = 'addr-end'; end.textContent = lower.slice(-suffix.length);
+  addrSpan.append(rest, end);
+  addrSpan._copyText = addr;
+  addRow('Token Address', addrSpan);
+
+  // User salt row
+  const saltSpan = document.createElement('span');
+  saltSpan.style.fontSize = '11px';
+  saltSpan.textContent = userSalt;
+  saltSpan._copyText = userSalt;
+  addRow('User Salt (bytes32)', saltSpan);
+
+  // Derived salt row
+  const derivedSpan = document.createElement('span');
+  derivedSpan.style.cssText = 'font-size:11px;color:var(--muted)';
+  derivedSpan.textContent = derivedSalt;
+  derivedSpan._copyText = derivedSalt;
+  addRow('Derived Salt (keccak)', derivedSpan);
+
+  // Usage hint
+  const hint = document.createElement('div');
+  hint.style.cssText = 'margin-top:12px;padding:10px 12px;background:var(--surface2);border-radius:7px;font-size:12px;color:var(--muted)';
+  hint.textContent = 'Pass this salt in the ';
+  const c1 = document.createElement('code');
+  c1.style.cssText = 'background:#ffffff10;padding:1px 5px;border-radius:4px;color:var(--text)';
+  c1.textContent = 'salt';
+  const c2 = document.createElement('code');
+  c2.style.cssText = 'background:#ffffff10;padding:1px 5px;border-radius:4px;color:var(--text)';
+  c2.textContent = 'BaseParams / CreateTTParams / CreateRFLParams';
+  const c3 = document.createElement('code');
+  c3.style.cssText = 'background:#ffffff10;padding:1px 5px;border-radius:4px;color:var(--text)';
+  c3.textContent = 'createToken / createTT / createRFL';
+  hint.append(c1, ' field of ', c2, ' when calling ', c3, '.');
+
+  item.append(header, grid, hint);
   el('resultsArea').appendChild(item);
 
   // Scroll into view

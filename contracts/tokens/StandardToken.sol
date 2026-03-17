@@ -22,6 +22,9 @@ contract StandardToken is ILaunchpadToken {
     error NothingToClaim();
     error InsufficientBalance();
     error ExceedsAllowance();
+    error BNBTransferFailed();
+    error TokenRescueFailed();
+    error CannotRescueOwnToken();
 
     bool    private _initialized;
     address private _owner;
@@ -217,4 +220,36 @@ contract StandardToken is ILaunchpadToken {
         _allowances[owner_][spender] = amount;
         emit Approval(owner_, spender, amount);
     }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // RESCUE
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// @notice Send stray BNB held by this contract to `to`.  Callable only by the owner.
+    function rescueBNB(address to) external onlyOwner {
+        if (to == address(0)) revert ZeroAddress();
+        uint256 bal = address(this).balance;
+        if (bal == 0) return;
+        (bool ok, ) = to.call{value: bal}('');
+        if (!ok) revert BNBTransferFailed();
+    }
+
+    receive() external payable {}
+
+    /// @notice Recover ERC-20 tokens accidentally sent to this contract.
+    ///         Cannot be used to pull the token's own supply out of the contract
+    ///         (that would allow the owner to drain vesting balances).
+    function rescueTokens(address tokenAddr, address to) external onlyOwner {
+        if (tokenAddr == address(0) || to == address(0)) revert ZeroAddress();
+        if (tokenAddr == address(this)) revert CannotRescueOwnToken();
+        uint256 bal = IERC20RescueSTD(tokenAddr).balanceOf(address(this));
+        if (bal == 0) return;
+        bool ok = IERC20RescueSTD(tokenAddr).transfer(to, bal);
+        if (!ok) revert TokenRescueFailed();
+    }
+}
+
+interface IERC20RescueSTD {
+    function balanceOf(address) external view returns (uint256);
+    function transfer(address, uint256) external returns (bool);
 }

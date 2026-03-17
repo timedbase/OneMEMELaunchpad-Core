@@ -115,6 +115,7 @@ contract LaunchpadFactory {
         uint256 migrationTarget;
 
         address pair;              // PancakeSwap pair — created at launch, liquidity added at migration
+        address router;            // PancakeSwap router snapshotted at creation; used for migration
 
         bool    antibotEnabled;
         uint256 creationBlock;
@@ -215,6 +216,28 @@ contract LaunchpadFactory {
 
     address public pendingOwner;
 
+    // ─── Timelock ─────────────────────────────────────────────────────────
+    // Sensitive owner parameters (router, fees, fee recipients) require a 48-hour
+    // delay between proposal and execution.  This caps damage from a compromised
+    // owner key to the window in which community/ops can detect and react.
+    uint256 public constant TIMELOCK_DELAY = 48 hours;
+
+    bytes32 public constant TL_SET_ROUTER         = keccak256("SET_ROUTER");
+    bytes32 public constant TL_SET_PLATFORM_FEE   = keccak256("SET_PLATFORM_FEE");
+    bytes32 public constant TL_SET_CHARITY_FEE    = keccak256("SET_CHARITY_FEE");
+    bytes32 public constant TL_SET_FEE_RECIPIENT  = keccak256("SET_FEE_RECIPIENT");
+    bytes32 public constant TL_SET_CHARITY_WALLET = keccak256("SET_CHARITY_WALLET");
+
+    /// @notice Maps action ID to the timestamp after which it may be executed.  0 = not queued.
+    mapping(bytes32 => uint256) public timelockExpiry;
+
+    // Pending values held until the corresponding timelock matures.
+    address private _pendingRouter;
+    uint256 private _pendingPlatformFee;
+    uint256 private _pendingCharityFee;
+    address private _pendingFeeRecipient;
+    address private _pendingCharityWallet;
+
     // ─────────────────────────────────────────────────────────────────────
     // ERRORS
     // ─────────────────────────────────────────────────────────────────────
@@ -239,6 +262,10 @@ contract LaunchpadFactory {
     error BNBTransferFailed();
     error RefundFailed();
     error AntibotBlocksOutOfRange();
+    error TimelockNotQueued();
+    error TimelockNotExpired();
+    error DeadlineExpired();
+    error ParamOutOfRange();
 
     // ─────────────────────────────────────────────────────────────────────
     // EVENTS
@@ -249,6 +276,8 @@ contract LaunchpadFactory {
         TokenType       tokenType,
         address indexed creator,
         uint256         totalSupply,
+        uint256         virtualBNB,
+        uint256         migrationTarget,
         bool            antibotEnabled,
         uint256         tradingBlock
     );
@@ -273,9 +302,9 @@ contract LaunchpadFactory {
         uint256 liquidityBNB,
         uint256 liquidityTokens
     );
-    event DefaultParamsUpdated(uint256 virtualBNB, uint256 migrationTarget);
-    event CreationFeeUpdated(uint256 fee);
-    event RouterUpdated(address router);
+    event DefaultParamsUpdated(uint256 oldVirtualBNB, uint256 newVirtualBNB, uint256 oldMigrationTarget, uint256 newMigrationTarget);
+    event CreationFeeUpdated(uint256 oldFee, uint256 newFee);
+    event RouterUpdated(address indexed oldRouter, address indexed newRouter);
     event FeeRecipientUpdated(address recipient);
     event CharityWalletUpdated(address wallet);
     event PlatformFeeUpdated(uint256 feeBps);
@@ -284,6 +313,9 @@ contract LaunchpadFactory {
     event ManagerRemoved(address indexed manager);
     event OwnershipTransferProposed(address indexed current, address indexed proposed);
     event OwnershipTransferred(address indexed prev, address indexed next);
+    event TimelockQueued(bytes32 indexed actionId, uint256 executeAfter);
+    event TimelockExecuted(bytes32 indexed actionId);
+    event TimelockCancelled(bytes32 indexed actionId);
 
     // ─────────────────────────────────────────────────────────────────────
     // MODIFIERS
@@ -365,7 +397,7 @@ contract LaunchpadFactory {
         if (earlyBuy > 0) _executeBuy(token, msg.sender, earlyBuy, 0, true);
 
         emit TokenCreated(token, TokenType.STANDARD, msg.sender, a.supply,
-            p.enableAntibot, tokens[token].tradingBlock);
+            defaultVirtualBNB, defaultMigrationTarget, p.enableAntibot, tokens[token].tradingBlock);
     }
 
     /**
@@ -387,7 +419,7 @@ contract LaunchpadFactory {
         if (earlyBuy > 0) _executeBuy(token, msg.sender, earlyBuy, 0, true);
 
         emit TokenCreated(token, TokenType.TAX, msg.sender, a.supply,
-            p.enableAntibot, tokens[token].tradingBlock);
+            defaultVirtualBNB, defaultMigrationTarget, p.enableAntibot, tokens[token].tradingBlock);
     }
 
     /**
@@ -411,7 +443,7 @@ contract LaunchpadFactory {
         if (earlyBuy > 0) _executeBuy(token, msg.sender, earlyBuy, 0, true);
 
         emit TokenCreated(token, TokenType.REFLECTION, msg.sender, a.supply,
-            p.enableAntibot, tokens[token].tradingBlock);
+            defaultVirtualBNB, defaultMigrationTarget, p.enableAntibot, tokens[token].tradingBlock);
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -421,9 +453,11 @@ contract LaunchpadFactory {
     /**
      * @notice Buy tokens on the bonding curve.
      * @param token_  Token address (must not be migrated)
-     * @param minOut  Minimum tokens to receive (slippage guard)
+     * @param minOut    Minimum tokens to receive (price slippage guard)
+     * @param deadline  Unix timestamp after which the tx reverts (time slippage guard)
      */
-    function buy(address token_, uint256 minOut) external payable nonReentrant {
+    function buy(address token_, uint256 minOut, uint256 deadline) external payable nonReentrant {
+        if (block.timestamp > deadline) revert DeadlineExpired();
         if (msg.value == 0) revert ZeroAmount();
         _executeBuy(token_, msg.sender, msg.value, minOut, false);
     }
@@ -436,9 +470,11 @@ contract LaunchpadFactory {
      * @notice Sell tokens back to the bonding curve for BNB.
      * @param token_    Token address
      * @param amountIn  Token amount to sell
-     * @param minBNBOut Minimum BNB to receive (slippage guard)
+     * @param minBNBOut Minimum BNB to receive (price slippage guard)
+     * @param deadline  Unix timestamp after which the tx reverts (time slippage guard)
      */
-    function sell(address token_, uint256 amountIn, uint256 minBNBOut) external nonReentrant {
+    function sell(address token_, uint256 amountIn, uint256 minBNBOut, uint256 deadline) external nonReentrant {
+        if (block.timestamp > deadline) revert DeadlineExpired();
         TokenConfig storage tc = tokens[token_];
         if (tc.token == address(0)) revert UnknownToken();
         if (tc.migrated)            revert AlreadyMigrated();
@@ -450,17 +486,21 @@ contract LaunchpadFactory {
         uint256 poolBNB       = tc.virtualBNB + tc.raisedBNB;
         uint256 poolTokens    = tc.bcTokensTotal - tc.bcTokensSold;
         uint256 newPoolTokens = poolTokens + amountIn;
-        uint256 newPoolBNB    = tc.k / newPoolTokens;
-        uint256 grossBNB      = poolBNB - newPoolBNB;
+        // Ceiling division: round newPoolBNB up so grossBNB is slightly smaller, protecting the pool.
+        uint256 newPoolBNB    = (tc.k + newPoolTokens - 1) / newPoolTokens;
+        uint256 grossBNB      = poolBNB > newPoolBNB ? poolBNB - newPoolBNB : 0;
         if (grossBNB > tc.raisedBNB) revert InsufficientPoolBNB();
 
         uint256 totalFee = platformFee + charityFee;
-        uint256 fee    = (grossBNB * totalFee) / BPS_DENOM;
+        // Ceiling division: round fee up so the protocol never loses BNB to truncation.
+        uint256 fee    = totalFee == 0 ? 0 : (grossBNB * totalFee + BPS_DENOM - 1) / BPS_DENOM;
         uint256 netBNB = grossBNB - fee;
         if (netBNB < minBNBOut) revert SlippageTooLittleBNB();
 
         tc.raisedBNB    -= grossBNB;
-        _totalRaisedBNB -= grossBNB;
+        // Guard against _totalRaisedBNB drift from rounding across many trades.
+        if (grossBNB >= _totalRaisedBNB) _totalRaisedBNB = 0;
+        else                             _totalRaisedBNB -= grossBNB;
         tc.bcTokensSold -= amountIn;
 
         (bool ok,) = payable(msg.sender).call{value: netBNB}("");
@@ -533,15 +573,17 @@ contract LaunchpadFactory {
 
         if (bnbIn >= grossNeeded) {
             refund    = bnbIn - grossNeeded;
+            // Floor division intentional: ensures netBNB >= bnbNeeded for migration to trigger.
             fee       = (grossNeeded * totalFee) / BPS_DENOM;
             netBNB    = grossNeeded - fee;
             tokensOut = poolTokens;
         } else {
-            fee       = (bnbIn * totalFee) / BPS_DENOM;
+            // Ceiling division: round fee up so the protocol never loses BNB to truncation.
+            fee       = totalFee == 0 ? 0 : (bnbIn * totalFee + BPS_DENOM - 1) / BPS_DENOM;
             netBNB    = bnbIn - fee;
             uint256 newPoolBNB = poolBNB + netBNB;
-            tokensOut = poolTokens - (tc.k / newPoolBNB);
-            if (tokensOut > poolTokens) tokensOut = poolTokens;
+            // Ceiling division: round up k/newPoolBNB so tokensOut is slightly smaller, protecting the pool.
+            tokensOut = poolTokens - ((tc.k + newPoolBNB - 1) / newPoolBNB);
         }
 
         if (tokensOut == 0)     revert ZeroAmount();
@@ -552,14 +594,29 @@ contract LaunchpadFactory {
         tc.bcTokensSold += tokensOut;
 
         _dispatchFee(fee);
+        _settleTokens(token_, buyer, tokensOut, refund, bnbIn, skipAntibot, tc);
+    }
 
-        uint256 tokensToUser = tokensOut;
+    /// @dev Handles antibot penalty, token transfers, BNB refund, event, and migration trigger.
+    function _settleTokens(
+        address              token_,
+        address              buyer,
+        uint256              tokensOut,
+        uint256              refund,
+        uint256              bnbIn,
+        bool                 skipAntibot,
+        TokenConfig storage  tc
+    ) private {
         uint256 tokensToDead = 0;
+        uint256 tokensToUser = tokensOut;
 
         if (!skipAntibot && tc.antibotEnabled && block.number < tc.tradingBlock) {
-            uint256 blocksPassed = block.number - tc.creationBlock;
-            uint256 totalBlocks  = tc.tradingBlock - tc.creationBlock;
-            uint256 penaltyBPS   = BPS_DENOM - (blocksPassed * BPS_DENOM / totalBlocks);
+            uint256 remaining   = tc.tradingBlock - block.number;
+            uint256 totalBlocks = tc.tradingBlock - tc.creationBlock;
+            // Ceiling division: penalty decreases slightly more slowly, preventing bots from
+            // exploiting floor rounding to get a lower-than-intended penalty on the boundary.
+            uint256 penaltyBPS  = (remaining * BPS_DENOM + totalBlocks - 1) / totalBlocks;
+            if (penaltyBPS > BPS_DENOM) penaltyBPS = BPS_DENOM;
             tokensToDead = (tokensOut * penaltyBPS) / BPS_DENOM;
             tokensToUser = tokensOut - tokensToDead;
         }
@@ -586,17 +643,22 @@ contract LaunchpadFactory {
         uint256 migrationBNB = tc.raisedBNB;
         uint256 liqTokens    = tc.liquidityTokens;
 
-        _totalRaisedBNB -= migrationBNB;
+        if (migrationBNB >= _totalRaisedBNB) _totalRaisedBNB = 0;
+        else                                 _totalRaisedBNB -= migrationBNB;
 
         address pair_ = tc.pair;
 
-        ILaunchpadToken(token_).approve(pancakeRouter, liqTokens);
+        // Use the router that was live when this token was created (tc.router), not the current
+        // factory router.  This prevents a router change between creation and migration from
+        // directing liquidity to a pool the token contract never knew about.
+        address router_ = tc.router;
+        ILaunchpadToken(token_).approve(router_, liqTokens);
 
         // LP tokens sent to dead wallet — permanently locked.
         // Minimums at 99 % to protect against pre-created pair sandwich attacks.
         uint256 amountTokenMin = liqTokens    * 9900 / 10000;
         uint256 amountETHMin   = migrationBNB * 9900 / 10000;
-        IPancakeRouter02(pancakeRouter).addLiquidityETH{value: migrationBNB}(
+        IPancakeRouter02(router_).addLiquidityETH{value: migrationBNB}(
             token_, liqTokens, amountTokenMin, amountETHMin, DEAD, block.timestamp + 300
         );
 
@@ -694,7 +756,8 @@ contract LaunchpadFactory {
         allTokens.push(token_);
         _tokensByCreator[msg.sender].push(token_);
 
-        tc.pair = pair_;
+        tc.pair   = pair_;
+        tc.router = pancakeRouter; // snapshot at creation — immune to future proposeSetRouter changes
 
         if (a.creatorTokens > 0) {
             ILaunchpadToken(token_).transfer(token_, a.creatorTokens);
@@ -713,44 +776,115 @@ contract LaunchpadFactory {
     function setDefaultParams(uint256 virtualBNB_, uint256 migrationTarget_) external onlyOwnerOrManager {
         if (virtualBNB_      == 0) revert ZeroAmount();
         if (migrationTarget_ == 0) revert ZeroAmount();
+        // Upper bounds prevent a compromised manager from setting degenerate values that
+        // make future launches unmigrateable or price degenerate.
+        if (virtualBNB_      > 10_000 ether) revert ParamOutOfRange();
+        if (migrationTarget_ > 100_000 ether) revert ParamOutOfRange();
+        emit DefaultParamsUpdated(defaultVirtualBNB, virtualBNB_, defaultMigrationTarget, migrationTarget_);
         defaultVirtualBNB      = virtualBNB_;
         defaultMigrationTarget = migrationTarget_;
-        emit DefaultParamsUpdated(virtualBNB_, migrationTarget_);
     }
 
     /// @notice Set the creation fee in BNB wei.  May be set to zero.
-    function setCreationFee(uint256 fee_) external onlyOwnerOrManager {
+    function setCreationFee(uint256 fee_) external onlyOwner {
+        emit CreationFeeUpdated(creationFee, fee_);
         creationFee = fee_;
-        emit CreationFeeUpdated(fee_);
     }
 
-    /// @notice Set the platform fee in bps.  Combined charityFee + platformFee must not exceed 250 (2.5 %).
-    function setPlatformFee(uint256 fee_) external onlyOwner {
+    // ─── Timelock helpers ─────────────────────────────────────────────────
+
+    function _queueAction(bytes32 actionId) private {
+        uint256 unlock = block.timestamp + TIMELOCK_DELAY;
+        timelockExpiry[actionId] = unlock;
+        emit TimelockQueued(actionId, unlock);
+    }
+
+    function _consumeAction(bytes32 actionId) private {
+        uint256 expiry = timelockExpiry[actionId];
+        if (expiry == 0) revert TimelockNotQueued();
+        if (block.timestamp < expiry) revert TimelockNotExpired();
+        timelockExpiry[actionId] = 0;
+        emit TimelockExecuted(actionId);
+    }
+
+    /// @notice Cancel a queued timelock action before it executes.
+    function cancelAction(bytes32 actionId) external onlyOwner {
+        if (timelockExpiry[actionId] == 0) revert TimelockNotQueued();
+        timelockExpiry[actionId] = 0;
+        emit TimelockCancelled(actionId);
+    }
+
+    // ─── Platform fee ─────────────────────────────────────────────────────
+
+    /// @notice Propose a platform-fee change.  Execute after 48 h with executeSetPlatformFee().
+    function proposeSetPlatformFee(uint256 fee_) external onlyOwner {
         if (fee_ + charityFee > MAX_TOTAL_FEE) revert FeeExceedsMax();
-        platformFee = fee_;
-        emit PlatformFeeUpdated(fee_);
+        _pendingPlatformFee = fee_;
+        _queueAction(TL_SET_PLATFORM_FEE);
     }
 
-    /// @notice Set the charity fee in bps.  Combined charityFee + platformFee must not exceed 250 (2.5 %).
-    function setCharityFee(uint256 fee_) external onlyOwner {
+    /// @notice Apply the proposed platform fee once the 48-hour timelock has elapsed.
+    function executeSetPlatformFee() external onlyOwner {
+        _consumeAction(TL_SET_PLATFORM_FEE);
+        // Re-validate: charityFee may have changed since proposal.
+        if (_pendingPlatformFee + charityFee > MAX_TOTAL_FEE) revert FeeExceedsMax();
+        platformFee = _pendingPlatformFee;
+        emit PlatformFeeUpdated(_pendingPlatformFee);
+    }
+
+    // ─── Charity fee ──────────────────────────────────────────────────────
+
+    /// @notice Propose a charity-fee change.  Execute after 48 h with executeSetCharityFee().
+    function proposeSetCharityFee(uint256 fee_) external onlyOwner {
         if (platformFee + fee_ > MAX_TOTAL_FEE) revert FeeExceedsMax();
-        charityFee = fee_;
-        emit CharityFeeUpdated(fee_);
+        _pendingCharityFee = fee_;
+        _queueAction(TL_SET_CHARITY_FEE);
     }
 
-    function setFeeRecipient(address rec_) external onlyOwner {
+    /// @notice Apply the proposed charity fee once the 48-hour timelock has elapsed.
+    function executeSetCharityFee() external onlyOwner {
+        _consumeAction(TL_SET_CHARITY_FEE);
+        // Re-validate: platformFee may have changed since proposal.
+        if (platformFee + _pendingCharityFee > MAX_TOTAL_FEE) revert FeeExceedsMax();
+        charityFee = _pendingCharityFee;
+        emit CharityFeeUpdated(_pendingCharityFee);
+    }
+
+    // ─── Fee recipient ────────────────────────────────────────────────────
+
+    /// @notice Propose a new fee-recipient address.  Execute after 48 h with executeSetFeeRecipient().
+    function proposeSetFeeRecipient(address rec_) external onlyOwner {
         if (rec_ == address(0)) revert ZeroAddress();
-        feeRecipient = rec_;
-        emit FeeRecipientUpdated(rec_);
+        _pendingFeeRecipient = rec_;
+        _queueAction(TL_SET_FEE_RECIPIENT);
     }
 
-    function setRouter(address router_) external onlyOwner {
+    /// @notice Apply the proposed fee recipient once the 48-hour timelock has elapsed.
+    function executeSetFeeRecipient() external onlyOwner {
+        _consumeAction(TL_SET_FEE_RECIPIENT);
+        feeRecipient = _pendingFeeRecipient;
+        emit FeeRecipientUpdated(_pendingFeeRecipient);
+    }
+
+    // ─── Router ───────────────────────────────────────────────────────────
+
+    /// @notice Propose a new PancakeSwap router.  Execute after 48 h with executeSetRouter().
+    function proposeSetRouter(address router_) external onlyOwner {
         if (router_ == address(0)) revert ZeroAddress();
-        // Validate the router exposes the expected PancakeSwap V2 interface.
-        IPancakeRouter02(router_).factory();
-        IPancakeRouter02(router_).WETH();
-        pancakeRouter = router_;
-        emit RouterUpdated(router_);
+        // Validate the router exposes the expected PancakeSwap V2 interface and that its
+        // factory() and WETH() return non-zero values (rejects trivially fake routers).
+        address factory_ = IPancakeRouter02(router_).factory();
+        address weth_    = IPancakeRouter02(router_).WETH();
+        if (factory_ == address(0) || weth_ == address(0)) revert ZeroAddress();
+        _pendingRouter = router_;
+        _queueAction(TL_SET_ROUTER);
+    }
+
+    /// @notice Apply the proposed router once the 48-hour timelock has elapsed.
+    function executeSetRouter() external onlyOwner {
+        _consumeAction(TL_SET_ROUTER);
+        emit RouterUpdated(pancakeRouter, _pendingRouter);
+        pancakeRouter = _pendingRouter;
     }
 
     /// @notice Propose a new owner.  The candidate must call acceptOwnership() to confirm.
@@ -768,7 +902,7 @@ contract LaunchpadFactory {
         pendingOwner = address(0);
     }
 
-    /// @notice Add an address as a manager.  Managers may update creationFee and default params.
+    /// @notice Add an address as a manager.  Managers may only update default bonding-curve params (setDefaultParams).
     function addManager(address manager_) external onlyOwner {
         if (manager_ == address(0)) revert ZeroAddress();
         managers[manager_] = true;
@@ -777,25 +911,37 @@ contract LaunchpadFactory {
 
     /// @notice Remove a manager.
     function removeManager(address manager_) external onlyOwner {
+        if (!managers[manager_]) revert Unauthorized();
         managers[manager_] = false;
         emit ManagerRemoved(manager_);
     }
 
+    // ─── Charity wallet ───────────────────────────────────────────────────
+
     /**
-     * @notice Set the charity wallet address.
+     * @notice Propose a new charity wallet.  Execute after 48 h with executeSetCharityWallet().
      *         The `charityFee` bps portion of each fee is routed here.
-     *         Set to address(0) to redirect the charity portion to feeRecipient.
+     *         Propose address(0) to redirect the charity portion to feeRecipient.
      */
-    function setCharityWallet(address wallet_) external onlyOwner {
-        charityWallet = wallet_;
-        emit CharityWalletUpdated(wallet_);
+    function proposeSetCharityWallet(address wallet_) external onlyOwner {
+        _pendingCharityWallet = wallet_;
+        _queueAction(TL_SET_CHARITY_WALLET);
     }
 
-    /// @notice Sweep any BNB not accounted for by active bonding-curve pools to feeRecipient.
-    function rescueBNB() external onlyOwner {
+    /// @notice Apply the proposed charity wallet once the 48-hour timelock has elapsed.
+    function executeSetCharityWallet() external onlyOwner {
+        _consumeAction(TL_SET_CHARITY_WALLET);
+        charityWallet = _pendingCharityWallet;
+        emit CharityWalletUpdated(_pendingCharityWallet);
+    }
+
+    /// @notice Sweep any BNB not accounted for by active bonding-curve pools to `to`.
+    ///         Explicit destination avoids failure if feeRecipient is a non-payable contract.
+    function rescueBNB(address to) external onlyOwner {
+        if (to == address(0)) revert ZeroAddress();
         if (address(this).balance <= _totalRaisedBNB) revert ZeroAmount();
         uint256 stray = address(this).balance - _totalRaisedBNB;
-        _safeSendBNB(feeRecipient, stray);
+        _safeSendBNB(to, stray);
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -825,13 +971,13 @@ contract LaunchpadFactory {
             : (bnbNeeded * BPS_DENOM + (BPS_DENOM - totalFee) - 1) / (BPS_DENOM - totalFee);
 
         if (bnbIn >= grossNeeded) {
-            feeBNB    = (grossNeeded * totalFee) / BPS_DENOM;
+            feeBNB    = (grossNeeded * totalFee) / BPS_DENOM; // floor, mirrors execution path
             tokensOut = poolTokens;
         } else {
-            feeBNB    = (bnbIn * totalFee) / BPS_DENOM;
-            uint256 netBNB = bnbIn - feeBNB;
-            tokensOut = poolTokens - (tc.k / (poolBNB + netBNB));
-            if (tokensOut > poolTokens) tokensOut = poolTokens;
+            feeBNB    = totalFee == 0 ? 0 : (bnbIn * totalFee + BPS_DENOM - 1) / BPS_DENOM;
+            uint256 netBNB    = bnbIn - feeBNB;
+            uint256 newPoolBNB = poolBNB + netBNB;
+            tokensOut = poolTokens - ((tc.k + newPoolBNB - 1) / newPoolBNB);
         }
     }
 
@@ -849,9 +995,11 @@ contract LaunchpadFactory {
         uint256 poolBNB     = tc.virtualBNB + tc.raisedBNB;
         uint256 poolToks    = tc.bcTokensTotal - tc.bcTokensSold;
         uint256 newPoolToks = poolToks + tokensIn;
-        uint256 grossBNB    = poolBNB - (tc.k / newPoolToks);
+        uint256 newPoolBNB_ = (tc.k + newPoolToks - 1) / newPoolToks; // ceiling, mirrors sell()
+        uint256 grossBNB    = poolBNB > newPoolBNB_ ? poolBNB - newPoolBNB_ : 0;
         if (grossBNB > tc.raisedBNB) return (0, 0);
-        feeBNB = (grossBNB * (platformFee + charityFee)) / BPS_DENOM;
+        uint256 totalFee_   = platformFee + charityFee;
+        feeBNB = totalFee_ == 0 ? 0 : (grossBNB * totalFee_ + BPS_DENOM - 1) / BPS_DENOM;
         bnbOut = grossBNB - feeBNB;
     }
 
@@ -912,7 +1060,7 @@ contract LaunchpadFactory {
         uint256 total   = cFee + platformFee;
         address charity = charityWallet;
         if (charity != address(0) && cFee > 0 && total > 0) {
-            uint256 charityAmt = amount * cFee / total;
+            uint256 charityAmt = (amount * cFee + total - 1) / total; // ceiling — charity gets exact share
             _safeSendBNB(charity,      charityAmt);
             _safeSendBNB(feeRecipient, amount - charityAmt);
         } else {
@@ -938,6 +1086,11 @@ contract LaunchpadFactory {
 
     function tokenCountByCreator(address creator_) external view returns (uint256) {
         return _tokensByCreator[creator_].length;
+    }
+
+    /// @notice Returns the valid range for antibotBlocks when creating a token with antibot enabled.
+    function getAntibotBlocksRange() external pure returns (uint256 min, uint256 max) {
+        return (ANTIBOT_MIN_BLOCKS, ANTIBOT_MAX_BLOCKS);
     }
 
     receive() external payable {}

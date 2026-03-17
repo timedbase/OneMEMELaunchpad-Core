@@ -48,8 +48,8 @@ interface IPancakeFactoryRFL {
  *     holder's balance passively increases as _rTotal is reduced.
  *   - Custom mode  (reflectionToken != address(0)): reflection tax is accumulated
  *     and swapped to the set token, then pushed proportionally to all holders
- *     whose balance meets the minimum threshold (default 0.1 % of total supply;
- *     owner may raise this but never lower it below 0.1 %).
+ *     whose balance meets the minimum threshold (default 0.02 % of total supply;
+ *     owner may raise this but never lower it below 0.02 %).
  *
  * Vesting:
  *   - Creator tokens (5 % allocation) are held in address(this) as self-escrow.
@@ -77,6 +77,8 @@ contract ReflectionToken is ILaunchpadToken {
     error BNBTransferFailed();
     error BelowMinReflectionThreshold();
     error SwapThresholdTooLow();
+    error ReflectionTransferFailed();
+    error TokenRescueFailed();
 
     address private _owner;
     address private _factory;
@@ -115,12 +117,19 @@ contract ReflectionToken is ILaunchpadToken {
 
     uint256 public constant MAX_TOTAL_TAX = 1000; // 10 %
 
-    // 0.1 % of total supply — minimum holder balance to qualify for custom reflection.
-    // Owner can set reflectionMinBalance higher but never lower.
-    uint256 private constant MIN_REFLECTION_BPS     = 10;  // 0.1 %
-    // 0.05 % of total supply — floor for swapThreshold; prevents zero-amount swap DoS.
+    // 0.02 % of total supply — minimum holder balance to qualify for custom reflection.
+    // Owner can set reflectionMinBalance higher but never lower than this floor.
+    uint256 private constant MIN_REFLECTION_BPS     = 2;   // 0.02 %
+    // 0.02 % of total supply — floor for swapThreshold; prevents zero-amount swap DoS.
     uint256 private constant MIN_SWAP_THRESHOLD_BPS = 2;   // 0.02 %
     uint256 private constant BPS_DENOM              = 10000;
+
+    // Hard cap on the push-distribution holder list to prevent OOG in _distributeReflection.
+    // At 500 holders, two full iterations cost ~10–15 M gas, safely within BSC's 30 M gas limit.
+    // Holders beyond the cap do not participate in custom reflection push-distribution but
+    // continue to receive native RFI reflection (if the token is in native mode).
+    // The owner can switch to native mode via setReflectionToken(address(0)) at any time.
+    uint256 public constant MAX_REFLECTION_HOLDERS = 500;
 
     uint256 public swapThreshold;
 
@@ -140,7 +149,7 @@ contract ReflectionToken is ILaunchpadToken {
     address public reflectionToken;
 
     /// @notice Minimum token balance required to receive custom reflection.
-    ///         Initialised to 0.1 % of total supply; owner may only raise it.
+    ///         Initialised to 0.02 % of total supply; owner may only raise it.
     uint256 public reflectionMinBalance;
 
     address[] private _holders;
@@ -228,7 +237,7 @@ contract ReflectionToken is ILaunchpadToken {
         // All taxes start at 0 % — configured post-deployment by the owner.
         // (buyMarketingTax, buyTeamTax, ..., sellReflectionTax are all default 0.)
 
-        // Default reflection minimum: 0.1 % of total supply.
+        // Default reflection minimum: 0.02 % of total supply.
         reflectionMinBalance = (_tTotal * MIN_REFLECTION_BPS) / BPS_DENOM;
 
         _isExcludedFromFee[factory_]      = true;
@@ -490,6 +499,8 @@ contract ReflectionToken is ILaunchpadToken {
         path[0] = address(this);
         path[1] = pancakeRouter.WETH();
         _approve(address(this), address(pancakeRouter), tokenAmount);
+        // amountOutMin = 0: no on-chain oracle is available at swap time.
+        // Sandwich risk is accepted; owner may call manualSwap() when conditions are favourable.
         pancakeRouter.swapExactTokensForETHSupportingFeeOnTransferTokens(
             tokenAmount, 0, path, address(this), block.timestamp
         );
@@ -510,6 +521,7 @@ contract ReflectionToken is ILaunchpadToken {
             path[2] = reflectionToken;
         }
         _approve(address(this), address(pancakeRouter), tokenAmount);
+        // amountOutMin = 0: no oracle available; sandwich risk is accepted (same as _swapTokensForBNB).
         pancakeRouter.swapExactTokensForTokensSupportingFeeOnTransferTokens(
             tokenAmount, 0, path, address(this), block.timestamp
         );
@@ -517,11 +529,12 @@ contract ReflectionToken is ILaunchpadToken {
 
     /// @dev Add/remove addr from holder list based on balance.
     ///      Addresses excluded from reflection are never tracked.
+    ///      List is capped at MAX_REFLECTION_HOLDERS to prevent OOG in _distributeReflection.
     function _updateHolderList(address addr) private {
         if (addr == address(0) || _isExcludedFromReflection[addr]) return;
         uint256 bal = balanceOf(addr);
         if (bal > 0) {
-            if (_holderIndex[addr] == 0) {
+            if (_holderIndex[addr] == 0 && _holders.length < MAX_REFLECTION_HOLDERS) {
                 _holders.push(addr);
                 _holderIndex[addr] = _holders.length; // 1-based
             }
@@ -559,7 +572,8 @@ contract ReflectionToken is ILaunchpadToken {
             if (bal >= minBal) {
                 uint256 share = amount * bal / eligibleSupply;
                 if (share > 0) {
-                    IERC20Minimal(reflectionToken).transfer(holder, share);
+                    bool ok = IERC20Minimal(reflectionToken).transfer(holder, share);
+                    if (!ok) revert ReflectionTransferFailed();
                     unchecked { ++recipients; }
                 }
             }
@@ -569,6 +583,8 @@ contract ReflectionToken is ILaunchpadToken {
 
     function _addLiquidity(uint256 tokenAmount, uint256 bnbAmount) private {
         _approve(address(this), address(pancakeRouter), tokenAmount);
+        // Minimums = 0: no oracle available.  LP is sent to burn address so any
+        // temporary under-valuation is irreversible but does not benefit an attacker.
         pancakeRouter.addLiquidityETH{value: bnbAmount}(
             address(this), tokenAmount, 0, 0, BURN_ADDRESS, block.timestamp
         );
@@ -627,6 +643,12 @@ contract ReflectionToken is ILaunchpadToken {
         }
         _tOwned[account]                   = 0;
         _isExcludedFromReflection[account] = false;
+        // Re-add to holder list if the account has a balance, so it resumes receiving
+        // custom reflection distributions without waiting for a transfer.
+        if (balanceOf(account) > 0 && _holderIndex[account] == 0) {
+            _holders.push(account);
+            _holderIndex[account] = _holders.length; // 1-based
+        }
         emit IncludedInReflection(account);
     }
 
@@ -649,11 +671,13 @@ contract ReflectionToken is ILaunchpadToken {
     /**
      * @notice Set the minimum token balance a holder must have to receive
      *         custom reflection distributions.
-     *         Cannot be set below 0.1 % of total supply (dust protection).
+     *         Cannot be set below 0.02 % of total supply (dust protection) and
+     *         cannot be decreased from the current value — only increases are allowed.
      */
     function setReflectionMinBalance(uint256 minBalance_) external onlyOwner {
         uint256 floor = (_tTotal * MIN_REFLECTION_BPS) / BPS_DENOM;
         if (minBalance_ < floor) revert BelowMinReflectionThreshold();
+        if (minBalance_ < reflectionMinBalance) revert BelowMinReflectionThreshold();
         reflectionMinBalance = minBalance_;
         emit ReflectionMinBalanceSet(minBalance_);
     }
@@ -685,7 +709,6 @@ contract ReflectionToken is ILaunchpadToken {
         if (amount < _tTotal * MIN_SWAP_THRESHOLD_BPS / BPS_DENOM) revert SwapThresholdTooLow();
         swapThreshold = amount;
     }
-    function setSwapEnabled(bool enabled)       external onlyOwner { swapEnabled   = enabled; }
     function excludeFromFee(address a, bool ex) external onlyOwner { _isExcludedFromFee[a] = ex; }
 
     function transferOwnership(address newOwner) external onlyOwner {
@@ -708,15 +731,18 @@ contract ReflectionToken is ILaunchpadToken {
         swapAndDistribute(taxBalance);
     }
 
-    function rescueBNB() external onlyOwner {
-        (bool ok,) = payable(_owner).call{value: address(this).balance}("");
+    function rescueBNB(address to) external onlyOwner {
+        if (to == address(0)) revert ZeroAddress();
+        (bool ok,) = payable(to).call{value: address(this).balance}("");
         if (!ok) revert BNBTransferFailed();
     }
 
-    function rescueTokens(address tokenAddr) external onlyOwner {
+    function rescueTokens(address tokenAddr, address to) external onlyOwner {
         if (tokenAddr == address(this)) revert CannotRescueOwnToken();
-        uint256 bal = ILaunchpadToken(tokenAddr).balanceOf(address(this));
-        ILaunchpadToken(tokenAddr).transfer(_owner, bal);
+        if (to == address(0)) revert ZeroAddress();
+        uint256 bal = IERC20Minimal(tokenAddr).balanceOf(address(this));
+        bool ok = IERC20Minimal(tokenAddr).transfer(to, bal);
+        if (!ok) revert TokenRescueFailed();
     }
 
     // ─────────────────────────────────────────────────────────────────────

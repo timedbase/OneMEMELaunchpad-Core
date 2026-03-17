@@ -21,6 +21,12 @@ interface IPancakeFactoryTT {
     function getPair(address tokenA, address tokenB)   external view returns (address);
 }
 
+/// @dev Minimal ERC-20 interface used only by rescueTokens().
+interface IERC20Rescue {
+    function balanceOf(address account) external view returns (uint256);
+    function transfer(address to, uint256 amount) external returns (bool);
+}
+
 /**
  * @title TaxToken  (OneMEME Launchpad)
  * @notice ERC-20 with configurable buy/sell taxes.
@@ -53,6 +59,7 @@ contract TaxToken is ILaunchpadToken {
     error NoVesting();
     error NothingToClaim();
     error BNBTransferFailed();
+    error TokenRescueFailed();
 
     address private _owner;
     address private _factory;
@@ -348,6 +355,8 @@ contract TaxToken is ILaunchpadToken {
         path[0] = address(this);
         path[1] = pancakeRouter.WETH();
         _approve(address(this), address(pancakeRouter), tokenAmount);
+        // amountOutMin = 0: no on-chain oracle is available at swap time.
+        // Sandwich risk is accepted; the token owner may call manualSwap() when conditions are favourable.
         pancakeRouter.swapExactTokensForETHSupportingFeeOnTransferTokens(
             tokenAmount, 0, path, address(this), block.timestamp
         );
@@ -355,6 +364,8 @@ contract TaxToken is ILaunchpadToken {
 
     function _addLiquidity(uint256 tokenAmount, uint256 bnbAmount) private {
         _approve(address(this), address(pancakeRouter), tokenAmount);
+        // Minimums = 0: no oracle available.  LP is sent to burn address so any
+        // temporary under-valuation is irreversible but does not benefit an attacker.
         pancakeRouter.addLiquidityETH{value: bnbAmount}(
             address(this), tokenAmount, 0, 0, BURN_ADDRESS, block.timestamp
         );
@@ -400,7 +411,6 @@ contract TaxToken is ILaunchpadToken {
         if (amount < _totalSupply * MIN_SWAP_THRESHOLD_BPS / BPS_DENOM) revert SwapThresholdTooLow();
         swapThreshold = amount;
     }
-    function setSwapEnabled(bool enabled)       external onlyOwner { swapEnabled   = enabled; }
     function excludeFromFee(address a, bool ex) external onlyOwner { _isExcludedFromFee[a] = ex; }
 
     function transferOwnership(address newOwner) external onlyOwner {
@@ -422,15 +432,18 @@ contract TaxToken is ILaunchpadToken {
         swapAndDistribute(taxBalance);
     }
 
-    function rescueBNB() external onlyOwner {
-        (bool ok,) = payable(_owner).call{value: address(this).balance}("");
+    function rescueBNB(address to) external onlyOwner {
+        if (to == address(0)) revert ZeroAddress();
+        (bool ok,) = payable(to).call{value: address(this).balance}("");
         if (!ok) revert BNBTransferFailed();
     }
 
-    function rescueTokens(address tokenAddr) external onlyOwner {
+    function rescueTokens(address tokenAddr, address to) external onlyOwner {
         if (tokenAddr == address(this)) revert CannotRescueOwnToken();
-        uint256 bal = ILaunchpadToken(tokenAddr).balanceOf(address(this));
-        ILaunchpadToken(tokenAddr).transfer(_owner, bal);
+        if (to == address(0)) revert ZeroAddress();
+        uint256 bal = IERC20Rescue(tokenAddr).balanceOf(address(this));
+        bool ok = IERC20Rescue(tokenAddr).transfer(to, bal);
+        if (!ok) revert TokenRescueFailed();
     }
 
     // ─────────────────────────────────────────────────────────────────────
