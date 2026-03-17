@@ -391,7 +391,7 @@ contract LaunchpadFactory {
 
         Alloc memory a = _computeAlloc(_supplyFromOption(p.supplyOption), p.enableCreatorAlloc);
 
-        StandardToken(token).initForLaunchpad(p.name, p.symbol, a.supply, address(this), msg.sender, p.metaURI);
+        StandardToken(payable(token)).initForLaunchpad(p.name, p.symbol, a.supply, address(this), msg.sender, p.metaURI);
         _registerToken(token, TokenType.STANDARD, a, address(0), p.enableAntibot, p.antibotBlocks);
 
         if (earlyBuy > 0) _executeBuy(token, msg.sender, earlyBuy, 0, true);
