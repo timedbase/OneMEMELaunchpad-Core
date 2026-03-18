@@ -259,7 +259,6 @@ contract LaunchpadFactory {
         if (standardImpl_           == address(0)) revert ZeroAddress();
         if (taxImpl_                == address(0)) revert ZeroAddress();
         if (reflectionImpl_         == address(0)) revert ZeroAddress();
-        if (vestingWallet_          == address(0)) revert ZeroAddress();
 
         owner                  = msg.sender;
         bondingCurve           = BondingCurve(payable(bondingCurve_));
@@ -496,6 +495,13 @@ contract LaunchpadFactory {
     // ─────────────────────────────────────────────────────────────────────
     // ADMIN — OWNERSHIP / MANAGERS
     // ─────────────────────────────────────────────────────────────────────
+
+    /// @notice Set the VestingWallet address. Can only be called once (when vestingWallet is zero).
+    function setVestingWallet(address vestingWallet_) external onlyOwner {
+        if (vestingWallet != address(0)) revert Unauthorized();
+        if (vestingWallet_ == address(0)) revert ZeroAddress();
+        vestingWallet = vestingWallet_;
+    }
 
     function transferOwnership(address newOwner_) external onlyOwner {
         if (newOwner_ == address(0)) revert ZeroAddress();
