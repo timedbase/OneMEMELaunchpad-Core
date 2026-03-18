@@ -37,7 +37,7 @@ The system is split into three contracts with distinct responsibilities:
 | Contract | Responsibilities |
 |----------|-----------------|
 | **LaunchpadFactory** | Token clone deployment (CREATE2), creation fee collection, default bonding-curve parameters, ownership + manager roles, timelocked configuration of BondingCurve, buy/sell/migrate convenience pass-throughs. `bondingCurve` address is immutable — set once at deployment. |
-| **BondingCurve** | All per-token AMM state (`TokenConfig`), buy/sell/migrate execution, trade fee collection and dispatch, DEX migration. Acts as the token's `factory` so it can call `postMigrateSetup()`. |
+| **BondingCurve** | All per-token AMM state (`TokenConfig`), buy/sell/migrate execution, trade fee collection and dispatch, DEX migration. The `deployer` (immutable, set at construction) is the only address that can call `setFactory()` — all other admin is `onlyFactory`. |
 | **VestingWallet** | Single shared vesting escrow for all tokens launched through the factory. Receives creator allocations at token creation. Beneficiaries claim linearly over 12 months. Owner may void any schedule, burning remaining tokens immediately. |
 
 Tokens are minted **directly to BondingCurve** at launch. The `factory` field on each token is set to `address(bondingCurve)` so BondingCurve has the authority to call token-internal lifecycle functions.
@@ -334,11 +334,11 @@ RFI-style passive reflection plus optional custom reflection token distribution.
 
 ## Deployment
 
-Each contract is deployed independently. Seven transactions total.
+Eight transactions total. Each contract is independently deployable and verifiable.
 
 ### 1. Deploy StandardToken
 
-No constructor arguments. This is the implementation contract — it is never initialised directly, only cloned.
+No constructor arguments. Implementation contract — never initialised directly, only cloned.
 
 ### 2. Deploy TaxToken
 
@@ -352,7 +352,6 @@ No constructor arguments.
 
 ```
 constructor(
-    address factory_,       // use your deployer EOA as placeholder
     address router_,        // PancakeSwap V2 router
     address feeRecipient_,  // receives platform fees and creation fees
     uint256 platformFee_,   // BPS → feeRecipient (e.g. 100 = 1 %)
@@ -360,7 +359,7 @@ constructor(
 )
 ```
 
-`platformFee_ + charityFee_` must not exceed 250 BPS (2.5 %).
+`deployer = msg.sender` is stored as an immutable. The factory address starts as `address(0)` and is set separately in step 8. `platformFee_ + charityFee_` must not exceed 250 BPS (2.5 %).
 
 ### 5. Deploy LaunchpadFactory
 
@@ -373,7 +372,7 @@ constructor(
     address standardImpl_,           // step 1 address
     address taxImpl_,                // step 2 address
     address reflectionImpl_,         // step 3 address
-    address vestingWallet_           // step 6 address — deploy VestingWallet first (see below)
+    address vestingWallet_           // address(0) — wired in step 7
 )
 ```
 
@@ -386,15 +385,33 @@ constructor(
 )
 ```
 
-> **Note:** Steps 5 and 6 are mutually dependent — each needs the other's address. Deploy LaunchpadFactory first with a placeholder for `vestingWallet_`, then deploy VestingWallet, then call `factory.setVestingWallet(vestingWalletAddress)`. Alternatively, use a deployer script that computes addresses ahead of time (e.g. via CREATE2 or `vm.computeCreateAddress`).
-
-### 7. Point BondingCurve at the factory
+### 7. Wire VestingWallet into the factory
 
 ```
-BondingCurve.setFactory(launchpadFactoryAddress)
+LaunchpadFactory.setVestingWallet(<step 6 address>)
 ```
 
-Called from the deployer EOA (which was used as `factory_` in step 4). After this call the deployer has no further authority over BondingCurve — only the factory can call its admin functions.
+Owner-only. Can only be called once (reverts if `vestingWallet` is already set).
+
+### 8. Point BondingCurve at the factory
+
+```
+BondingCurve.setFactory(<step 5 LaunchpadFactory address>)
+```
+
+Callable only by the `deployer` EOA (set at construction). Can be called again later to upgrade the factory.
+
+---
+
+## Security Model
+
+| Role | Address | Powers |
+|------|---------|--------|
+| **BondingCurve deployer** | Immutable EOA set at construction | `setFactory()` only — swap the factory contract for upgrades |
+| **LaunchpadFactory** (contract) | `bc.factory()` | All BondingCurve admin: register tokens, execute trades, set router/fees/recipients |
+| **Factory owner** | `factory.owner()` | Factory admin via 48h timelocks for sensitive BondingCurve config; instant factory-level settings |
+
+The BondingCurve deployer **cannot** directly call `setRouter`, `setFees`, `rescueBNB`, or any trading function. Updating the factory via `setFactory` only redirects admin control — the deployer gains no direct trading or fee power.
 
 ---
 
@@ -432,6 +449,7 @@ Testnet BNB faucet: `https://testnet.bnbchain.org/faucet-smart`
 | `acceptOwnership()` | Pending owner confirms the transfer |
 | `cancelAction(bytes32)` | Cancel a queued timelock action |
 | `rescueBNB(addr)` | Sweep stray BNB from BondingCurve (above active pool totals) to `addr` |
+| `setVestingWallet(addr)` | Wire in the VestingWallet address — owner only, callable once |
 
 ### VestingWallet (instant)
 

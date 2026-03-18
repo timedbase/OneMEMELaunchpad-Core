@@ -347,8 +347,10 @@ const FACTORY_ABI = [
   'function standardImpl() view returns (address)',
   'function taxImpl() view returns (address)',
   'function reflectionImpl() view returns (address)',
+  'function vestingWallet() view returns (address)',
   'function managers(address) view returns (bool)',
   'function timelockExpiry(bytes32) view returns (uint256)',
+  'function setVestingWallet(address)',
   'function setCreationFee(uint256)',
   'function setDefaultParams(uint256,uint256)',
   'function addManager(address)',
@@ -376,7 +378,9 @@ const FACTORY_ABI = [
 
 const BC_ABI = [
   'function factory() view returns (address)',
+  'function deployer() view returns (address)',
   'function pancakeRouter() view returns (address)',
+  'function setFactory(address)',
   'function feeRecipient() view returns (address)',
   'function charityWallet() view returns (address)',
   'function platformFee() view returns (uint256)',
@@ -571,8 +575,8 @@ async function refreshAll() {
 async function refreshOverview() {
   if (!factoryContract || !bcContract) return;
   try {
-    const [owner, pending, fee, vBNB, migTarget, stdImpl, taxImpl, reflImpl,
-           bcFactory, router, feeRec, charity, platFee, charFee, total] = await Promise.all([
+    const [owner, pending, fee, vBNB, migTarget, stdImpl, taxImpl, reflImpl, vestingWalletAddr,
+           bcFactory, bcDeployerAddr, router, feeRec, charity, platFee, charFee, total] = await Promise.all([
       factoryContract.owner(),
       factoryContract.pendingOwner(),
       factoryContract.creationFee(),
@@ -581,7 +585,9 @@ async function refreshOverview() {
       factoryContract.standardImpl(),
       factoryContract.taxImpl(),
       factoryContract.reflectionImpl(),
+      factoryContract.vestingWallet(),
       bcContract.factory(),
+      bcContract.deployer(),
       bcContract.pancakeRouter(),
       bcContract.feeRecipient(),
       bcContract.charityWallet(),
@@ -590,7 +596,7 @@ async function refreshOverview() {
       bcContract.totalTokensLaunched(),
     ]);
     cachedOwner = owner; cachedPendingOwner = pending;
-    bcData = { platFee, charFee, feeRec, charity, router };
+    bcData = { platFee, charFee, feeRec, charity, router, bcDeployerAddr };
 
     const fStats = document.getElementById('factoryStats');
     let h = '';
@@ -602,12 +608,14 @@ async function refreshOverview() {
     h += statCard('Standard Impl', short(stdImpl), stdImpl);
     h += statCard('Tax Impl', short(taxImpl), taxImpl);
     h += statCard('Reflection Impl', short(reflImpl), reflImpl);
+    h += statCard('Vesting Wallet', vestingWalletAddr && vestingWalletAddr !== ethers.ZeroAddress ? short(vestingWalletAddr) : '⚠ Not set', vestingWalletAddr);
     h += statCard('BondingCurve', short(bcAddr), bcAddr);
     fStats.innerHTML = h;
 
     const bcStats = document.getElementById('bcStats');
     let bh = '';
-    bh += statCard('Factory', short(bcFactory), bcFactory);
+    bh += statCard('Factory', bcFactory && bcFactory !== ethers.ZeroAddress ? short(bcFactory) : '⚠ Not set', bcFactory);
+    bh += statCard('Deployer', short(bcDeployerAddr), bcDeployerAddr);
     bh += statCard('Router', short(router), router);
     bh += statCard('Fee Recipient', short(feeRec), feeRec);
     bh += statCard('Charity Wallet', short(charity === ethers.ZeroAddress ? null : charity), charity);
@@ -1088,6 +1096,11 @@ async function refreshAdmin() {
   } catch(e) { container.innerHTML = '<div class="empty-state">Could not load admin data.</div>'; return; }
   const isOwner = walletAddress && owner.toLowerCase() === walletAddress.toLowerCase();
   const isPending = walletAddress && pending && pending !== ethers.ZeroAddress && pending.toLowerCase() === walletAddress.toLowerCase();
+  let bcDeployer = '';
+  let vestingWalletCurrent = ethers.ZeroAddress;
+  try { [bcDeployer, vestingWalletCurrent] = await Promise.all([bcContract.deployer(), factoryContract.vestingWallet()]); } catch {}
+  const isDeployer = walletAddress && bcDeployer && bcDeployer.toLowerCase() === walletAddress.toLowerCase();
+  const vestingSet = vestingWalletCurrent && vestingWalletCurrent !== ethers.ZeroAddress;
 
   // Build timelock data
   const tlData = {};
@@ -1201,6 +1214,35 @@ async function refreshAdmin() {
         ${renderTLCard('SET_FEE_RECIPIENT', 'Fee Recipient', 'text', 'feeRecipient', isOwner, tlData)}
         ${renderTLCard('SET_CHARITY_WALLET', 'Charity Wallet', 'text', 'charityWallet', isOwner, tlData)}
         ${renderTLCard('SET_ROUTER', 'Router', 'text', 'pancakeRouter', isOwner, tlData)}
+      </div>
+    </div>
+
+    <!-- Setup / One-time Actions -->
+    <div class="section">
+      <div class="section-title">Setup <small style="font-size:11px;color:var(--muted);font-weight:400;">(deployment wiring)</small></div>
+      <div class="grid2">
+        <div class="admin-card ${!isOwner?'owner-gate':''}">
+          ${!isOwner?'<div class="owner-overlay"><span class="badge muted">Owner only</span></div>':''}
+          <div class="admin-card-header">Set Vesting Wallet <small style="font-size:10px;color:var(--muted);">Factory</small></div>
+          <div class="admin-card-body">
+            ${vestingSet ? `<div class="tl-strip ready" style="margin-bottom:10px;">Already set: <span class="mono">${esc(short(vestingWalletCurrent))}</span></div>` : '<div class="tl-strip pending" style="margin-bottom:10px;">Not yet configured</div>'}
+            <div class="form-row">
+              <div class="form-group"><label class="form-label">VestingWallet address</label><input type="text" id="newVestingWallet" placeholder="0x…" class="mono" /></div>
+              <button class="btn" onclick="setVestingWallet()" ${!isOwner||vestingSet?'disabled':''}>Set</button>
+            </div>
+          </div>
+        </div>
+        <div class="admin-card ${!isDeployer?'owner-gate':''}">
+          ${!isDeployer?'<div class="owner-overlay"><span class="badge muted">BC Deployer only</span></div>':''}
+          <div class="admin-card-header">Set Factory <small style="font-size:10px;color:var(--muted);">BondingCurve</small></div>
+          <div class="admin-card-body">
+            <div class="form-label" style="margin-bottom:6px;">BC Deployer: <span class="mono" style="font-size:12px;">${esc(short(bcDeployer))}</span> ${copyBtn(bcDeployer)}</div>
+            <div class="form-row">
+              <div class="form-group"><label class="form-label">New factory address</label><input type="text" id="newBcFactory" placeholder="0x…" class="mono" /></div>
+              <button class="btn" onclick="setBcFactory()" ${!isDeployer?'disabled':''}>Set</button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   `;
@@ -1332,6 +1374,31 @@ async function acceptOwnership() {
     const tx = await fc.acceptOwnership();
     toast('Tx sent…','warn',8000); await tx.wait();
     toast('Ownership accepted!','ok'); await refreshAll();
+  } catch(e) { toast('Failed: '+(e.reason||e.message||e),'danger'); }
+}
+
+async function setVestingWallet() {
+  if (!signer) { toast('Connect wallet','warn'); return; }
+  const addr = document.getElementById('newVestingWallet').value.trim();
+  if (!ethers.isAddress(addr)) { toast('Invalid address','danger'); return; }
+  try {
+    const fc = new ethers.Contract(factoryAddr, FACTORY_ABI, signer);
+    const tx = await fc.setVestingWallet(addr);
+    toast('Tx sent…','warn',8000); await tx.wait();
+    toast('Vesting wallet set','ok'); await refreshAll();
+  } catch(e) { toast('Failed: '+(e.reason||e.message||e),'danger'); }
+}
+
+async function setBcFactory() {
+  if (!signer) { toast('Connect wallet','warn'); return; }
+  const addr = document.getElementById('newBcFactory').value.trim();
+  if (!ethers.isAddress(addr)) { toast('Invalid address','danger'); return; }
+  if (!confirm(`Set BondingCurve factory to ${addr}?`)) return;
+  try {
+    const bc = new ethers.Contract(bcAddr, BC_ABI, signer);
+    const tx = await bc.setFactory(addr);
+    toast('Tx sent…','warn',8000); await tx.wait();
+    toast('Factory updated on BondingCurve','ok'); await refreshAll();
   } catch(e) { toast('Failed: '+(e.reason||e.message||e),'danger'); }
 }
 
