@@ -210,8 +210,7 @@ contract ReflectionToken is ILaunchpadToken {
      * @notice One-shot initialiser called by the factory.
      *         Wallets default to tokenOwner_, swapThreshold defaults to 0.1 % of supply.
      *         All taxes start at 0 % — configure post-deployment via setBuyTaxes / setSellTaxes.
-     * @param tokenOwner_    Address that owns the token after migration
-     * @param router_        PancakeSwap V2 router — stored and used to create the pair immediately
+     * @param router_  PancakeSwap V2 router — stored and used to create the pair immediately
      */
     function initForLaunchpad(
         string    calldata name_,
@@ -240,18 +239,12 @@ contract ReflectionToken is ILaunchpadToken {
         _tTotal = totalSupply_;
         _rTotal = MAX_UINT - (MAX_UINT % _tTotal);
 
-        // Wallets default to owner — updatable post-deployment via setWallets().
         marketingWallet = tokenOwner_;
         teamWallet      = tokenOwner_;
 
-        // swapThreshold defaults to 0.1 % of supply — updatable post-deployment via setSwapThreshold().
         swapThreshold = totalSupply_ / 1000;
         swapEnabled   = false;
 
-        // All taxes start at 0 % — configured post-deployment by the owner.
-        // (buyMarketingTax, buyTeamTax, ..., sellReflectionTax are all default 0.)
-
-        // Default reflection minimum: 0.02 % of total supply.
         reflectionMinBalance = (_tTotal * MIN_REFLECTION_BPS) / BPS_DENOM;
 
         _isExcludedFromFee[factory_]       = true;
@@ -260,7 +253,7 @@ contract ReflectionToken is ILaunchpadToken {
         _isExcludedFromFee[address(this)]  = true;
         _isExcludedFromFee[BURN_ADDRESS]   = true;
 
-        // Reflection exclusions — factory holds all tokens and must use _tOwned.
+        // factory holds all tokens and must use _tOwned.
         // BondingCurve is also excluded: it holds large balances and must not
         // receive or skew passive reflection distributions.
         _rOwned[factory_] = _rTotal;
@@ -638,14 +631,7 @@ contract ReflectionToken is ILaunchpadToken {
         ));
     }
 
-    /**
-     * @notice EIP-2612 permit — approve by signature, enabling approve + trade in one tx.
-     * @param owner_   Token owner granting the approval
-     * @param spender  Address being approved
-     * @param value    Allowance amount
-     * @param deadline Unix timestamp after which the signature is invalid
-     * @param v,r,s    EIP-712 signature components
-     */
+    /// @notice EIP-2612 permit — approve by signature, enabling approve + trade in one tx.
     function permit(
         address owner_,
         address spender,
@@ -868,7 +854,6 @@ contract ReflectionToken is ILaunchpadToken {
         emit VestingClaimed(_owner, claimable);
     }
 
-    /// @notice Tokens the current owner can claim right now.
     function claimableVesting() external view returns (uint256) {
         if (vestingTotal == 0) return 0;
         uint256 elapsed = block.timestamp - vestingStart;

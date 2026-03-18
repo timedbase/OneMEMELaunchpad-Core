@@ -263,12 +263,6 @@ contract BondingCurve {
     // BUY — direct
     // ─────────────────────────────────────────────────────────────────────
 
-    /**
-     * @notice Buy tokens on the bonding curve.
-     * @param token_   Token address (must not be migrated)
-     * @param minOut   Minimum tokens to receive (slippage guard)
-     * @param deadline Unix timestamp after which the call reverts
-     */
     function buy(address token_, uint256 minOut, uint256 deadline) external payable nonReentrant {
         if (block.timestamp > deadline) revert DeadlineExpired();
         if (msg.value == 0) revert ZeroAmount();
@@ -367,10 +361,7 @@ contract BondingCurve {
     // MIGRATE
     // ─────────────────────────────────────────────────────────────────────
 
-    /**
-     * @notice Migrate a completed bonding curve to PancakeSwap.
-     *         Permissionless once raisedBNB ≥ migrationTarget.
-     */
+    /// @notice Permissionless once raisedBNB ≥ migrationTarget.
     function migrate(address token_) external nonReentrant {
         TokenConfig storage tc = tokens[token_];
         if (tc.token == address(0))            revert UnknownToken();
@@ -667,9 +658,7 @@ contract BondingCurve {
         }
     }
 
-    /**
-     * @notice BNB received for selling a given token amount (after trade fee).
-     */
+    /// @notice BNB received for selling a given token amount (after trade fee).
     function getAmountOutSell(address token_, uint256 tokensIn)
         external view
         returns (uint256 bnbOut, uint256 feeBNB)

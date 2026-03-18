@@ -220,15 +220,6 @@ contract LaunchpadFactory {
     // CONSTRUCTOR
     // ─────────────────────────────────────────────────────────────────────
 
-    /**
-     * @param bondingCurve_           Deployed BondingCurve contract
-     * @param creationFee_            Token creation fee in BNB wei
-     * @param defaultVirtualBNB_      Default virtual BNB seeded into bonding curve
-     * @param defaultMigrationTarget_ Default BNB raise target before DEX migration
-     * @param standardImpl_           Deployed StandardToken implementation
-     * @param taxImpl_                Deployed TaxToken implementation
-     * @param reflectionImpl_         Deployed ReflectionToken implementation
-     */
     constructor(
         address bondingCurve_,
         uint256 creationFee_,
@@ -274,7 +265,6 @@ contract LaunchpadFactory {
         uint256 tradingBlock_;
         {
             Alloc memory a = _computeAlloc(_supplyFromOption(p.supplyOption), p.enableCreatorAlloc);
-            // Mints entire supply to this factory; factory and bc are both exempt from fees.
             StandardToken(payable(token)).initForLaunchpad(
                 p.name, p.symbol, a.supply, address(this), address(bc), msg.sender, p.metaURI
             );
@@ -344,10 +334,8 @@ contract LaunchpadFactory {
     // PASS-THROUGH TRADING
     // ─────────────────────────────────────────────────────────────────────
 
-    /**
-     * @notice Buy tokens via the bonding curve (factory-routed).
-     *         Users may also call BondingCurve.buy() directly.
-     */
+    /// @notice Buy tokens via the bonding curve (factory-routed).
+    ///         Users may also call BondingCurve.buy() directly.
     function buy(address token_, uint256 minOut, uint256 deadline) external payable nonReentrant {
         if (block.timestamp > deadline) revert DeadlineExpired();
         if (msg.value == 0) revert ZeroAmount();
@@ -389,7 +377,6 @@ contract LaunchpadFactory {
         defaultMigrationTarget = migrationTarget_;
     }
 
-    /// @notice Set the token creation fee in BNB wei.  May be set to zero.
     function setCreationFee(uint256 fee_) external onlyOwner {
         emit CreationFeeUpdated(creationFee, fee_);
         creationFee = fee_;

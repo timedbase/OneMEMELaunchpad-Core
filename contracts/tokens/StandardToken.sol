@@ -76,13 +76,6 @@ contract StandardToken is ILaunchpadToken {
     // INIT
     // ─────────────────────────────────────────────────────────────────────
 
-    /**
-     * @notice Called once by the factory after clone deployment.
-     * @param name_       Token name
-     * @param symbol_     Token symbol
-     * @param totalSupply_ Total supply (18 decimals already scaled by caller)
-     * @param factory_    Factory address — receives the entire supply
-     */
     function initForLaunchpad(
         string  calldata name_,
         string  calldata symbol_,
@@ -118,10 +111,8 @@ contract StandardToken is ILaunchpadToken {
     // METADATA URI
     // ─────────────────────────────────────────────────────────────────────
 
-    /// @notice Off-chain metadata URI — JSON with name, description, image, website, etc.
     function metaURI() external view override returns (string memory) { return _metaURI; }
 
-    /// @notice Update the metadata URI.  Callable only by the token owner.
     function setMetaURI(string calldata uri_) external override onlyOwner {
         _metaURI = uri_;
         emit MetaURIUpdated(uri_);
@@ -130,10 +121,6 @@ contract StandardToken is ILaunchpadToken {
     /// @notice No-op on StandardToken — no taxes to enable.  Satisfies ILaunchpadToken.
     function postMigrateSetup() external override onlyFactoryOrCurve {}
 
-    /**
-     * @notice Called once by the factory after it has transferred the creator
-     *         allocation to this contract.  Starts the 12-month linear vest.
-     */
     function setupVesting(address creator_, uint256 amount_) external override onlyFactory {
         if (vestingCreator != address(0)) revert VestingAlreadySet();
         if (creator_ == address(0))       revert ZeroAddress();
@@ -146,7 +133,6 @@ contract StandardToken is ILaunchpadToken {
 
     /**
      * @notice Claim linearly vested tokens.
-     *         Callable only by the current token owner.
      *         If ownership is transferred, the new owner inherits vesting rights.
      *         vestingCreator records the original recipient for transparency only.
      */
@@ -162,7 +148,6 @@ contract StandardToken is ILaunchpadToken {
         emit VestingClaimed(_owner, claimable);
     }
 
-    /// @notice How many tokens the current owner can claim right now.
     function claimableVesting() external view returns (uint256) {
         if (vestingTotal == 0) return 0;
         uint256 elapsed = block.timestamp - vestingStart;
@@ -262,14 +247,7 @@ contract StandardToken is ILaunchpadToken {
         ));
     }
 
-    /**
-     * @notice EIP-2612 permit — approve by signature, enabling approve + trade in one tx.
-     * @param owner_   Token owner granting the approval
-     * @param spender  Address being approved
-     * @param value    Allowance amount
-     * @param deadline Unix timestamp after which the signature is invalid
-     * @param v,r,s    EIP-712 signature components
-     */
+    /// @notice EIP-2612 permit — approve by signature, enabling approve + trade in one tx.
     function permit(
         address owner_,
         address spender,
@@ -295,7 +273,6 @@ contract StandardToken is ILaunchpadToken {
     // RESCUE
     // ─────────────────────────────────────────────────────────────────────
 
-    /// @notice Send stray BNB held by this contract to `to`.  Callable only by the owner.
     function rescueBNB(address to) external onlyOwner {
         if (to == address(0)) revert ZeroAddress();
         uint256 bal = address(this).balance;

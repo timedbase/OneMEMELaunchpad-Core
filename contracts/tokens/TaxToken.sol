@@ -154,8 +154,7 @@ contract TaxToken is ILaunchpadToken {
      *         deployment.  All tokens minted to factory_.
      *         Wallets default to tokenOwner_, all taxes start at 0 %,
      *         swapThreshold defaults to 0.1 % of supply.
-     * @param tokenOwner_    Address that owns the token after migration
-     * @param router_        PancakeSwap V2 router — stored and used to create the pair immediately
+     * @param router_  PancakeSwap V2 router — stored and used to create the pair immediately
      */
     function initForLaunchpad(
         string    calldata name_,
@@ -183,14 +182,10 @@ contract TaxToken is ILaunchpadToken {
         _symbol      = symbol_;
         _totalSupply = totalSupply_;
 
-        // Wallets default to owner — updatable post-deployment via setWallets().
         marketingWallet = tokenOwner_;
         teamWallet      = tokenOwner_;
         treasuryWallet  = tokenOwner_;
 
-        // All taxes start at 0 % — updatable post-deployment via setBuyTaxes/setSellTaxes().
-
-        // swapThreshold defaults to 0.1 % of supply — updatable post-deployment via setSwapThreshold().
         swapThreshold = totalSupply_ / 1000;
         swapEnabled   = false;
 
@@ -220,10 +215,8 @@ contract TaxToken is ILaunchpadToken {
     // METADATA URI
     // ─────────────────────────────────────────────────────────────────────
 
-    /// @notice Off-chain metadata URI — JSON with name, description, image, website, etc.
     function metaURI() external view override returns (string memory) { return _metaURI; }
 
-    /// @notice Update the metadata URI.  Callable only by the token owner.
     function setMetaURI(string calldata uri_) external override onlyOwner {
         _metaURI = uri_;
         emit MetaURIUpdated(uri_);
@@ -417,14 +410,7 @@ contract TaxToken is ILaunchpadToken {
         ));
     }
 
-    /**
-     * @notice EIP-2612 permit — approve by signature, enabling approve + trade in one tx.
-     * @param owner_   Token owner granting the approval
-     * @param spender  Address being approved
-     * @param value    Allowance amount
-     * @param deadline Unix timestamp after which the signature is invalid
-     * @param v,r,s    EIP-712 signature components
-     */
+    /// @notice EIP-2612 permit — approve by signature, enabling approve + trade in one tx.
     function permit(
         address owner_,
         address spender,
@@ -526,10 +512,6 @@ contract TaxToken is ILaunchpadToken {
     // CREATOR VESTING  (self-custodied in this contract)
     // ─────────────────────────────────────────────────────────────────────
 
-    /**
-     * @notice Called once by the factory after transferring creator tokens here.
-     *         Starts the 12-month linear vesting schedule.
-     */
     function setupVesting(address creator_, uint256 amount_) external override onlyFactory {
         if (vestingCreator != address(0)) revert VestingAlreadySet();
         if (creator_ == address(0))       revert ZeroAddress();
@@ -560,7 +542,6 @@ contract TaxToken is ILaunchpadToken {
         emit VestingClaimed(_owner, claimable);
     }
 
-    /// @notice How many tokens the creator can claim right now.
     function claimableVesting() external view returns (uint256) {
         if (vestingTotal == 0) return 0;
         uint256 elapsed = block.timestamp - vestingStart;
