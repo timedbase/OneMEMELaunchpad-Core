@@ -243,45 +243,56 @@ Every token clone is deployed via CREATE2 and **must** end in `0x1111` (last 4 h
 
 The on-chain CREATE2 salt is `keccak256(abi.encode(msg.sender, userSalt))`, binding the salt to the creator so the same `userSalt` cannot be front-run by a different sender.
 
-**Off-chain salt mining (JavaScript):**
+**Off-chain salt mining (JavaScript — local, no RPC):**
+
+> **Salt is wallet-specific.** The on-chain formula is `keccak256(abi.encode(msg.sender, userSalt))` — a salt mined for wallet A produces a non-vanity address if submitted by wallet B. Always mine with the same wallet that will send the `createToken` transaction.
+
+Compute CREATE2 addresses entirely client-side. No RPC calls required — mines ~65 536 candidates in under a second.
 
 ```js
-// Choose the implementation address for the token type you want to create:
-//   factory.standardImpl()    → createToken()
-//   factory.taxImpl()         → createTT()
-//   factory.reflectionImpl()  → createRFL()
-const impl = await factory.standardImpl();
+import { ethers } from 'ethers';
 
-let userSalt;
-for (let n = 0n; ; n++) {
-  userSalt = ethers.zeroPadValue(ethers.toBeHex(n), 32);
-  const addr = await factory.predictTokenAddress(creatorAddr, userSalt, impl);
-  if (addr.toLowerCase().endsWith("1111")) break;
+// impl: factory.standardImpl() | factory.taxImpl() | factory.reflectionImpl()
+// creatorAddr: the EXACT wallet that will call createToken / createTT / createRFL
+function mineVanitySalt(factoryAddr, implAddr, creatorAddr) {
+  const initcode = '0x3d602d80600a3d3981f3363d3d373d3d3d363d73'
+    + implAddr.slice(2).toLowerCase()
+    + '5af43d82803e903d91602b57fd5bf3';
+  const initcodeHash = ethers.keccak256(ethers.getBytes(initcode));
+  const abiCoder = ethers.AbiCoder.defaultAbiCoder();
+  for (;;) {
+    const userSalt = ethers.randomBytes(32);
+    // Replicates the onchain binding: keccak256(abi.encode(msg.sender, userSalt))
+    const onchainSalt = ethers.keccak256(abiCoder.encode(['address', 'bytes32'], [creatorAddr, userSalt]));
+    const hash = ethers.keccak256(ethers.concat([new Uint8Array([0xff]), factoryAddr, onchainSalt, initcodeHash]));
+    const addr = ethers.getAddress('0x' + hash.slice(-40));
+    if (addr.toLowerCase().endsWith('1111')) return { userSalt: ethers.hexlify(userSalt), address: addr };
+  }
 }
+
+const { userSalt } = mineVanitySalt(factoryAddr, implAddr, creatorAddr);
+const creationFee = await factory.creationFee();
 
 // StandardToken
 await factory.createToken(
-  { name, symbol, supplyOption, enableCreatorAlloc, enableAntibot, antibotBlocks,
-    metaURI, salt: userSalt },
-  { value: creationFee }
+  [name, symbol, supplyOption, enableCreatorAlloc, enableAntibot, antibotBlocks, metaURI, userSalt],
+  { value: creationFee + earlyBuyWei }  // earlyBuyWei = 0n if no early buy
 );
 
 // TaxToken
 await factory.createTT(
-  { name, symbol, metaURI, supplyOption, enableCreatorAlloc, enableAntibot,
-    antibotBlocks, salt: userSalt },
-  { value: creationFee }
+  [name, symbol, metaURI, supplyOption, enableCreatorAlloc, enableAntibot, antibotBlocks, userSalt],
+  { value: creationFee + earlyBuyWei }
 );
 
 // ReflectionToken
 await factory.createRFL(
-  { name, symbol, metaURI, supplyOption, enableCreatorAlloc, enableAntibot,
-    antibotBlocks, salt: userSalt },
-  { value: creationFee }
+  [name, symbol, metaURI, supplyOption, enableCreatorAlloc, enableAntibot, antibotBlocks, userSalt],
+  { value: creationFee + earlyBuyWei }
 );
 ```
 
-`creationFee` defaults to `DEFAULT_CREATION_FEE` (`0.0011 ether`); read it at call time via `factory.creationFee()`. Expected mining iterations: ~65 536 (2^16). Completes in under a second in JS.
+`supplyOption`: `0` = ONE, `1` = THOUSAND, `2` = MILLION, `3` = BILLION. Expected mining iterations: ~65 536 (2^16). The Core Management dashboard includes a built-in one-click miner.
 
 ---
 
@@ -359,6 +370,7 @@ Call `BondingCurve.setFactory(address(launchpadFactory))` — this must be done 
 | `transferOwnership(addr)` | Propose two-step ownership transfer |
 | `acceptOwnership()` | Pending owner confirms the transfer |
 | `cancelAction(bytes32)` | Cancel a queued timelock action |
+| `rescueBNB(addr)` | Sweep stray BNB from BondingCurve (above active pool totals) to `addr` |
 
 ### BondingCurve Config (48h timelock, via factory)
 
@@ -382,7 +394,7 @@ Call `BondingCurve.setFactory(address(launchpadFactory))` — this must be done 
 | `allTokens(i)` | Token address at index `i` |
 | `getTokensByCreator(addr)` | All tokens launched by `addr` |
 | `tokenCountByCreator(addr)` | Token count for `addr` |
-| `tokens(addr)` | Full `TokenConfig` struct |
+| `getToken(addr)` | Full `TokenConfig` struct (mapping is `internal`; this replaces the public getter) |
 | `getAmountOut(token, bnbIn)` | `(tokensOut, feeBNB)` — buy quote, migration-cap aware |
 | `getAmountOutSell(token, tokensIn)` | `(bnbOut, feeBNB)` — sell quote |
 | `getSpotPrice(token)` | BNB per whole token ×1e18 |
@@ -414,19 +426,23 @@ Call `BondingCurve.setFactory(address(launchpadFactory))` — this must be done 
 | Antibot range | 10–199 blocks |
 | LP lock destination | `0x000…dEaD` (permanent) |
 | Vanity address suffix | `0x1111` (last 4 hex digits) |
-| Compiler | `solc ^0.8.32` with `viaIR: true`, `optimizer: 200 runs` |
+| Compiler | `solc ^0.8.32`, `optimizer: 200 runs` (viaIR not required) |
 
 ---
 
 ## Core Management Dashboard
 
-Open [`coremanagement/index.html`](coremanagement/index.html) in a browser. Connect MetaMask on BSC and paste the LaunchpadFactory address to:
+Open [`coremanagement/index.html`](coremanagement/index.html) in a browser. Connect MetaMask (or any injected wallet) on BSC / BSC Testnet and enter the LaunchpadFactory address. Works read-only without a wallet via a configurable RPC endpoint.
 
-- View factory and BondingCurve state side-by-side
-- Set creation fee and default bonding-curve parameters
-- Propose and execute timelocked BondingCurve configuration changes
-- Manage the owner and manager roles
-- Browse the token registry (reads directly from BondingCurve)
+Five tabs:
+
+| Tab | Purpose |
+|-----|---------|
+| **Overview** | Factory and BondingCurve state side-by-side; active timelock countdown |
+| **Create Token** | Full token creation flow — type selector, parameters, built-in salt miner (local, no RPC), one-click deploy |
+| **Registry** | Browse all launched tokens or filter by creator; progress bars; quick Inspect link |
+| **Inspector** | Per-token config, progress, spot price, live buy/sell/migrate with slippage and quote previews |
+| **Admin** | Creation fee, default params, rescue BNB, manager access, ownership transfer, all five timelocked BondingCurve actions |
 
 ---
 

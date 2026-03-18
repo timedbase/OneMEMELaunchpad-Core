@@ -73,11 +73,12 @@ contract BondingCurve {
         uint256   migrationTarget;
     }
 
-    /// @dev Memory struct to pack three uint256s into one stack slot for _executeBuy.
+    /// @dev Packed outputs from _calcBuy — one memory pointer keeps each frame stack-safe.
     struct BuyResult {
         uint256 refund;
         uint256 fee;
         uint256 tokensOut;
+        uint256 netBNBIn;  // bnbIn − refund; actual BNB consumed, used in the TokenBought emit
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -105,7 +106,9 @@ contract BondingCurve {
     address public feeRecipient;
     address public charityWallet; // address(0) → charity portion redirected to feeRecipient
 
-    mapping(address => TokenConfig) public tokens;
+    // internal: the auto-generated public getter for a 17-field struct exceeds the
+    // EVM's 16-slot stack limit without viaIR. Use getToken() instead.
+    mapping(address => TokenConfig) internal tokens;
     address[] public allTokens;
     mapping(address => address[]) private _tokensByCreator;
 
@@ -305,10 +308,7 @@ contract BondingCurve {
     /**
      * @notice Sell tokens back to the bonding curve for BNB.
      *         Caller must have approved this contract for `amountIn` tokens.
-     *
-     *         Stack budget (4 outer):
-     *           fee(5)/netBNB(6)/raisedAfter(7) = 7 baseline.
-     *           Scope adds tc/poolBNB/poolTokens/newPoolToks/newPoolBNB/grossBNB/totalFee = 7 → peak 14 ✓
+     *         Peak stack: 9 slots (token_/amountIn/minBNBOut/deadline/tc/fee/netBNB/raisedAfter/ok).
      */
     function sell(address token_, uint256 amountIn, uint256 minBNBOut, uint256 deadline)
         external nonReentrant
@@ -316,39 +316,15 @@ contract BondingCurve {
         if (block.timestamp > deadline) revert DeadlineExpired();
         if (amountIn == 0) revert ZeroAmount();
         ILaunchpadToken(token_).transferFrom(msg.sender, address(this), amountIn);
-
-        uint256 fee;
-        uint256 netBNB;
-        uint256 raisedAfter;
-
-        {
-            TokenConfig storage tc = tokens[token_];
-            if (tc.token == address(0)) revert UnknownToken();
-            if (tc.migrated)            revert AlreadyMigrated();
-            // Liquidity-reserve guard: only tokens that were previously bought can be sold back.
-            // liquidityTokens are held by this contract but are never part of the BC pool,
-            // so bcTokensSold can never include them — they are always reserved for migration.
-            if (amountIn > tc.bcTokensSold) revert ExceedsSoldSupply();
-
-            uint256 poolBNB      = tc.virtualBNB + tc.raisedBNB;
-            uint256 poolTokens   = tc.bcTokensTotal - tc.bcTokensSold;
-            uint256 newPoolToks  = poolTokens + amountIn;
-            uint256 newPoolBNB   = (tc.k + newPoolToks - 1) / newPoolToks;
-            uint256 grossBNB     = poolBNB > newPoolBNB ? poolBNB - newPoolBNB : 0;
-            if (grossBNB > tc.raisedBNB) revert InsufficientPoolBNB();
-
-            uint256 totalFee = platformFee + charityFee;
-            fee    = totalFee == 0 ? 0 : (grossBNB * totalFee + BPS_DENOM - 1) / BPS_DENOM;
-            netBNB = grossBNB - fee;
-            if (netBNB < minBNBOut) revert SlippageTooLittleBNB();
-
-            tc.raisedBNB -= grossBNB;
-            if (grossBNB >= _totalRaisedBNB) _totalRaisedBNB = 0;
-            else                             _totalRaisedBNB -= grossBNB;
-            tc.bcTokensSold -= amountIn;
-            raisedAfter = tc.raisedBNB;
-        }
-
+        TokenConfig storage tc = tokens[token_];
+        if (tc.token == address(0)) revert UnknownToken();
+        if (tc.migrated)            revert AlreadyMigrated();
+        // Liquidity-reserve guard: only tokens that were previously bought can be sold back.
+        // liquidityTokens are held by this contract but are never part of the BC pool,
+        // so bcTokensSold can never include them — they are always reserved for migration.
+        if (amountIn > tc.bcTokensSold) revert ExceedsSoldSupply();
+        (uint256 fee, uint256 netBNB) = _computeSell(tc, amountIn, minBNBOut);
+        uint256 raisedAfter = tc.raisedBNB;
         (bool ok,) = payable(msg.sender).call{value: netBNB}("");
         if (!ok) revert BNBTransferFailed();
         _dispatchFee(fee);
@@ -363,10 +339,7 @@ contract BondingCurve {
      * @notice Complete a sell initiated by the factory.
      *         The factory must have already transferred `amountIn` tokens to this contract
      *         via transferFrom(seller → address(this)) before calling.
-     *
-     *         Stack budget (5 outer):
-     *           fee(6)/netBNB(7)/raisedAfter(8) = 8 baseline.
-     *           Scope adds tc/poolBNB/poolTokens/newPoolToks/newPoolBNB/grossBNB/totalFee = 7 → peak 15 ✓
+     *         Peak stack: 10 slots (token_/seller/amountIn/minBNBOut/deadline/tc/fee/netBNB/raisedAfter/ok).
      */
     function completeSell(
         address token_,
@@ -377,37 +350,13 @@ contract BondingCurve {
     ) external nonReentrant onlyFactory {
         if (block.timestamp > deadline) revert DeadlineExpired();
         if (amountIn == 0) revert ZeroAmount();
-
-        uint256 fee;
-        uint256 netBNB;
-        uint256 raisedAfter;
-
-        {
-            TokenConfig storage tc = tokens[token_];
-            if (tc.token == address(0)) revert UnknownToken();
-            if (tc.migrated)            revert AlreadyMigrated();
-            // Liquidity-reserve guard: mirrors sell() — only previously-bought tokens accepted.
-            if (amountIn > tc.bcTokensSold) revert ExceedsSoldSupply();
-
-            uint256 poolBNB      = tc.virtualBNB + tc.raisedBNB;
-            uint256 poolTokens   = tc.bcTokensTotal - tc.bcTokensSold;
-            uint256 newPoolToks  = poolTokens + amountIn;
-            uint256 newPoolBNB   = (tc.k + newPoolToks - 1) / newPoolToks;
-            uint256 grossBNB     = poolBNB > newPoolBNB ? poolBNB - newPoolBNB : 0;
-            if (grossBNB > tc.raisedBNB) revert InsufficientPoolBNB();
-
-            uint256 totalFee = platformFee + charityFee;
-            fee    = totalFee == 0 ? 0 : (grossBNB * totalFee + BPS_DENOM - 1) / BPS_DENOM;
-            netBNB = grossBNB - fee;
-            if (netBNB < minBNBOut) revert SlippageTooLittleBNB();
-
-            tc.raisedBNB -= grossBNB;
-            if (grossBNB >= _totalRaisedBNB) _totalRaisedBNB = 0;
-            else                             _totalRaisedBNB -= grossBNB;
-            tc.bcTokensSold -= amountIn;
-            raisedAfter = tc.raisedBNB;
-        }
-
+        TokenConfig storage tc = tokens[token_];
+        if (tc.token == address(0)) revert UnknownToken();
+        if (tc.migrated)            revert AlreadyMigrated();
+        // Liquidity-reserve guard: mirrors sell() — only previously-bought tokens accepted.
+        if (amountIn > tc.bcTokensSold) revert ExceedsSoldSupply();
+        (uint256 fee, uint256 netBNB) = _computeSell(tc, amountIn, minBNBOut);
+        uint256 raisedAfter = tc.raisedBNB;
         (bool ok,) = payable(seller).call{value: netBNB}("");
         if (!ok) revert BNBTransferFailed();
         _dispatchFee(fee);
@@ -477,14 +426,10 @@ contract BondingCurve {
     // ─────────────────────────────────────────────────────────────────────
 
     /**
-     * @dev Core buy logic shared by buy(), buyFor(), and earlyBuy().
-     *      Returns true when migration should trigger; the caller is responsible
-     *      for calling _doMigrate() — keeping it outside this frame avoids the
-     *      combined caller + _executeBuy + _doMigrate depth exceeding 16 slots.
-     *
-     *      Migrates immediately if raisedBNB reaches migrationTarget after the buy.
-     *      viaIR compilation removes the legacy stack-depth constraint so _doMigrate
-     *      is called directly here rather than being deferred to the caller.
+     * @dev Entry point shared by buy(), buyFor(), and earlyBuy().
+     *      Split into _calcBuy + _finalizeBuy so each frame stays well under
+     *      the EVM's 16-slot stack limit without requiring viaIR.
+     *      Peak stack here: 7 slots (5 params + tc + r).
      */
     function _executeBuy(
         address token_,
@@ -496,52 +441,71 @@ contract BondingCurve {
         TokenConfig storage tc = tokens[token_];
         if (tc.token == address(0)) revert UnknownToken();
         if (tc.migrated)            revert AlreadyMigrated();
+        BuyResult memory r = _calcBuy(tc, bnbIn, minOut);
+        _dispatchFee(r.fee);
+        _finalizeBuy(tc, token_, buyer, skipAntibot, r);
+    }
 
-        BuyResult memory r;
+    /**
+     * @dev AMM math: computes fee, tokensOut, refund and updates tc state.
+     *      Peak stack: 9 slots (3 params + r + poolBNB + poolTokens + totalFee + grossNeeded + netBNB).
+     */
+    function _calcBuy(
+        TokenConfig storage tc,
+        uint256 bnbIn,
+        uint256 minOut
+    ) private returns (BuyResult memory r) {
+        uint256 poolBNB    = tc.virtualBNB + tc.raisedBNB;
+        uint256 poolTokens = tc.bcTokensTotal - tc.bcTokensSold;
+        uint256 totalFee   = platformFee + charityFee;
+        // grossNeeded = gross BNB required to hit the migration target exactly.
+        // Ceiling division ensures net amount covers the target after fee deduction.
+        uint256 grossNeeded = totalFee == 0
+            ? tc.migrationTarget - tc.raisedBNB
+            : ((tc.migrationTarget - tc.raisedBNB) * BPS_DENOM
+                + (BPS_DENOM - totalFee) - 1)
+              / (BPS_DENOM - totalFee);
+        uint256 netBNB;
 
-        // ── Scope A: AMM math ─────────────────────────────────────────────
-        {
-            uint256 poolBNB    = tc.virtualBNB + tc.raisedBNB;
-            uint256 poolTokens = tc.bcTokensTotal - tc.bcTokensSold;
-            // grossNeeded = gross BNB required to hit the migration target exactly.
-            // Ceiling division: ensures the net amount is sufficient after fee deduction.
-            uint256 grossNeeded = (platformFee + charityFee) == 0
-                ? tc.migrationTarget - tc.raisedBNB
-                : ((tc.migrationTarget - tc.raisedBNB) * BPS_DENOM
-                    + (BPS_DENOM - (platformFee + charityFee)) - 1)
-                  / (BPS_DENOM - (platformFee + charityFee));
-            uint256 netBNB;
-
-            if (bnbIn >= grossNeeded) {
-                // Migration-cap: sell ALL remaining BC tokens, refund excess BNB.
-                r.refund    = bnbIn - grossNeeded;
-                r.fee       = (grossNeeded * (platformFee + charityFee)) / BPS_DENOM;
-                netBNB      = grossNeeded - r.fee;
-                r.tokensOut = poolTokens;
-            } else {
-                r.fee       = (platformFee + charityFee) == 0
-                    ? 0
-                    : (bnbIn * (platformFee + charityFee) + BPS_DENOM - 1) / BPS_DENOM;
-                netBNB      = bnbIn - r.fee;
-                // Inline newPoolBNB (ceiling) to stay within stack budget.
-                r.tokensOut = poolTokens - ((tc.k + poolBNB + netBNB - 1) / (poolBNB + netBNB));
-            }
-
-            if (r.tokensOut == 0)        revert ZeroAmount();
-            if (r.tokensOut < minOut)    revert SlippageTooFewTokens();
-            // Hard guard: tokensOut must never exceed the BC pool — liquidity tokens are not for sale.
-            if (r.tokensOut > poolTokens) revert LiquidityReserveViolation();
-
-            tc.raisedBNB    += netBNB;
-            _totalRaisedBNB += netBNB;
-            tc.bcTokensSold += r.tokensOut;
+        if (bnbIn >= grossNeeded) {
+            // Migration-cap: sell ALL remaining BC tokens, refund excess BNB.
+            r.refund    = bnbIn - grossNeeded;
+            r.fee       = (grossNeeded * totalFee) / BPS_DENOM;
+            netBNB      = grossNeeded - r.fee;
+            r.tokensOut = poolTokens;
+            r.netBNBIn  = grossNeeded;
+        } else {
+            r.fee       = totalFee == 0
+                ? 0
+                : (bnbIn * totalFee + BPS_DENOM - 1) / BPS_DENOM;
+            netBNB      = bnbIn - r.fee;
+            r.tokensOut = poolTokens - ((tc.k + poolBNB + netBNB - 1) / (poolBNB + netBNB));
+            r.netBNBIn  = bnbIn;
         }
 
-        _dispatchFee(r.fee);
+        if (r.tokensOut == 0)         revert ZeroAmount();
+        if (r.tokensOut < minOut)     revert SlippageTooFewTokens();
+        // Hard guard: tokensOut must never exceed the BC pool — liquidity tokens are not for sale.
+        if (r.tokensOut > poolTokens) revert LiquidityReserveViolation();
 
-        // ── Scope B: settlement + antibot ─────────────────────────────────
+        tc.raisedBNB    += netBNB;
+        _totalRaisedBNB += netBNB;
+        tc.bcTokensSold += r.tokensOut;
+    }
+
+    /**
+     * @dev Settlement: antibot burn, token transfers, BNB refund, emit, auto-migrate.
+     *      Peak stack: 9 slots (5 params + tokensToDead + remaining + totalBlocks + penaltyBPS).
+     */
+    function _finalizeBuy(
+        TokenConfig storage tc,
+        address token_,
+        address buyer,
+        bool    skipAntibot,
+        BuyResult memory r
+    ) private {
+        uint256 tokensToDead;
         {
-            uint256 tokensToDead;
             if (!skipAntibot && tc.antibotEnabled && block.number < tc.tradingBlock) {
                 uint256 remaining   = tc.tradingBlock - block.number;
                 uint256 totalBlocks = tc.tradingBlock - tc.creationBlock;
@@ -551,21 +515,21 @@ contract BondingCurve {
                 if (penaltyBPS > BPS_DENOM) penaltyBPS = BPS_DENOM;
                 tokensToDead = (r.tokensOut * penaltyBPS) / BPS_DENOM;
             }
+        }
 
-            if (tokensToDead > 0)               ILaunchpadToken(token_).transfer(DEAD, tokensToDead);
-            if (r.tokensOut - tokensToDead > 0) ILaunchpadToken(token_).transfer(buyer, r.tokensOut - tokensToDead);
+        if (tokensToDead > 0)               ILaunchpadToken(token_).transfer(DEAD, tokensToDead);
+        if (r.tokensOut - tokensToDead > 0) ILaunchpadToken(token_).transfer(buyer, r.tokensOut - tokensToDead);
 
-            if (r.refund > 0) {
-                (bool ok,) = payable(buyer).call{value: r.refund}("");
-                if (!ok) revert RefundFailed();
-            }
+        if (r.refund > 0) {
+            (bool ok,) = payable(buyer).call{value: r.refund}("");
+            if (!ok) revert RefundFailed();
+        }
 
-            emit TokenBought(token_, buyer, bnbIn - r.refund, r.tokensOut, tokensToDead, tc.raisedBNB);
+        emit TokenBought(token_, buyer, r.netBNBIn, r.tokensOut, tokensToDead, tc.raisedBNB);
 
-            // Auto-migrate as soon as the target is met — no separate call required.
-            if (!tc.migrated && tc.raisedBNB >= tc.migrationTarget) {
-                _doMigrate(tc, token_);
-            }
+        // Auto-migrate as soon as the target is met — no separate call required.
+        if (!tc.migrated && tc.raisedBNB >= tc.migrationTarget) {
+            _doMigrate(tc, token_);
         }
     }
 
@@ -614,6 +578,36 @@ contract BondingCurve {
 
         tc.raisedBNB = 0;
         emit TokenMigrated(token_, pair_, migrationBNB, liqTokens);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // INTERNAL — SELL
+    // ─────────────────────────────────────────────────────────────────────
+
+    /**
+     * @dev AMM sell math + state update, shared by sell() and completeSell().
+     *      Two call sites prevent optimizer inlining; peak stack: 9 slots
+     *      (tc/amountIn/minBNBOut + fee/netBNB returns + poolBNB/newPoolToks/newPoolBNB/grossBNB).
+     *      totalFee reuses a slot after grossBNB is consumed.
+     */
+    function _computeSell(
+        TokenConfig storage tc,
+        uint256 amountIn,
+        uint256 minBNBOut
+    ) private returns (uint256 fee, uint256 netBNB) {
+        uint256 poolBNB     = tc.virtualBNB + tc.raisedBNB;
+        uint256 newPoolToks = tc.bcTokensTotal - tc.bcTokensSold + amountIn;
+        uint256 newPoolBNB  = (tc.k + newPoolToks - 1) / newPoolToks;
+        uint256 grossBNB    = poolBNB > newPoolBNB ? poolBNB - newPoolBNB : 0;
+        if (grossBNB > tc.raisedBNB) revert InsufficientPoolBNB();
+        uint256 totalFee    = platformFee + charityFee;
+        fee    = totalFee == 0 ? 0 : (grossBNB * totalFee + BPS_DENOM - 1) / BPS_DENOM;
+        netBNB = grossBNB - fee;
+        if (netBNB < minBNBOut) revert SlippageTooLittleBNB();
+        tc.raisedBNB -= grossBNB;
+        if (grossBNB >= _totalRaisedBNB) _totalRaisedBNB = 0;
+        else                             _totalRaisedBNB -= grossBNB;
+        tc.bcTokensSold -= amountIn;
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -701,6 +695,13 @@ contract BondingCurve {
         uint256 poolTokens = tc.bcTokensTotal - tc.bcTokensSold;
         if (poolTokens == 0) return type(uint256).max;
         price = (poolBNB * 1e18) / poolTokens;
+    }
+
+    /// @notice Returns the full TokenConfig for a registered token as a memory struct.
+    ///         (The mapping is internal; this replaces the auto-generated public getter
+    ///          which would overflow the stack without viaIR due to the 17-field struct.)
+    function getToken(address token_) external view returns (TokenConfig memory) {
+        return tokens[token_];
     }
 
     function totalTokensLaunched() external view returns (uint256) { return allTokens.length; }
