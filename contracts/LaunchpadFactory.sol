@@ -45,9 +45,9 @@ interface ITaxRflInit {
  *                        trade-fee collection and dispatch, DEX migration.
  *
  * ─── Token creation ────────────────────────────────────────────────────────
- *   initForLaunchpad is called with factory_ = address(bondingCurve) so the token
- *   mints its entire supply directly to BondingCurve.  The token's onlyFactory
- *   modifier then permits BondingCurve to call setupVesting() and postMigrateSetup().
+ *   initForLaunchpad is called with factory_ = address(this) so the token mints
+ *   its entire supply to LaunchpadFactory.  The factory then transfers liq + BC
+ *   tokens to BondingCurve, and creator tokens (if any) to VestingWallet.
  *
  * ─── Trading pass-throughs ─────────────────────────────────────────────────
  *   factory.buy()   → bondingCurve.buyFor()       (factory checks deadline)

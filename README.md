@@ -40,7 +40,7 @@ The system is split into three contracts with distinct responsibilities:
 | **BondingCurve** | All per-token AMM state (`TokenConfig`), buy/sell/migrate execution, trade fee collection and dispatch, DEX migration. The `deployer` (immutable, set at construction) is the only address that can call `setFactory()` — all other admin is `onlyFactory`. |
 | **VestingWallet** | Single shared vesting escrow for all tokens launched through the factory. Receives creator allocations at token creation. Beneficiaries claim linearly over 12 months. Owner may void any schedule, burning remaining tokens immediately. |
 
-Tokens are minted **directly to BondingCurve** at launch. The `factory` field on each token is set to `address(bondingCurve)` so BondingCurve has the authority to call token-internal lifecycle functions.
+Tokens are minted **to LaunchpadFactory** at launch. The factory then distributes: liquidity + bonding-curve supply to BondingCurve, and the creator allocation (if selected) to VestingWallet. The `factory` field on each token is set to `address(launchpadFactory)` so the factory has the authority to call token-internal lifecycle functions.
 
 Users may trade directly with BondingCurve or through the factory pass-throughs. For direct sells the user approves BondingCurve; for factory-routed sells the user approves LaunchpadFactory.
 
@@ -52,8 +52,9 @@ Users may trade directly with BondingCurve or through the factory pass-throughs.
 createToken / createTT / createRFL
         │  (msg.value = creation fee + optional early buy)
         ▼
-  CREATE2 clone → initForLaunchpad(factory_ = address(bondingCurve))
-  • 100 % of supply minted to BondingCurve
+  CREATE2 clone → initForLaunchpad(factory_ = address(launchpadFactory))
+  • 100 % of supply minted to LaunchpadFactory
+  • Factory distributes: liq + BC tokens → BondingCurve, creator tokens → VestingWallet
   • PancakeSwap pair created immediately (TAX/RFL tokens — empty, no liquidity yet)
   • _inBondingPhase = true  (taxes / reflection suppressed)
   • TaxToken / ReflectionToken: VestingWallet excluded from fee and reflection during init
