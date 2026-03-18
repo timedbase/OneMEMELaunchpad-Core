@@ -13,15 +13,34 @@ BSC meme-token launchpad with a bonding-curve presale, decaying antibot, creator
 ```
 contracts/
 ├── interfaces/
-│   └── ILaunchpadToken.sol      Minimal interface every token type implements
+│   ├── ILaunchpadToken.sol      Minimal interface every token type implements
+│   ├── IPancakeRouter02.sol     PancakeSwap V2 router interface
+│   └── IPostMigrate.sol         Callback interface for post-migration setup
 ├── tokens/
 │   ├── StandardToken.sol        Plain ERC-20 clone
 │   ├── TaxToken.sol             Buy/sell tax clone
 │   └── ReflectionToken.sol      RFI-style reflection clone
-└── LaunchpadFactory.sol         Bonding curve · antibot · vesting · migration
+├── BondingCurve.sol             All AMM state, buy/sell/migrate execution, fee dispatch
+└── LaunchpadFactory.sol         Token creation, clone deployment, admin, trading pass-throughs
+
+coremanagement/
+└── index.html                   Browser-based admin dashboard (MetaMask, BSC)
 ```
 
-The factory deploys one implementation contract per token type at construction and uses **EIP-1167 minimal proxies** (clones via CREATE2) for every launch, keeping deployment gas low while producing deterministic vanity addresses.
+---
+
+## Architecture
+
+The system is split into two contracts with distinct responsibilities:
+
+| Contract | Responsibilities |
+|----------|-----------------|
+| **LaunchpadFactory** | Token clone deployment (CREATE2), creation fee collection, default bonding-curve parameters, ownership + manager roles, timelocked configuration of BondingCurve, buy/sell/migrate convenience pass-throughs. `bondingCurve` address is immutable — set once at deployment. |
+| **BondingCurve** | All per-token AMM state (`TokenConfig`), buy/sell/migrate execution, trade fee collection and dispatch, DEX migration. Acts as the token's `factory` so it can call `setupVesting()` and `postMigrateSetup()` |
+
+Tokens are minted **directly to BondingCurve** at launch. The `factory` field on each token is set to `address(bondingCurve)` so BondingCurve has the authority to call token-internal lifecycle functions.
+
+Users may trade directly with BondingCurve or through the factory pass-throughs. For direct sells the user approves BondingCurve; for factory-routed sells the user approves LaunchpadFactory.
 
 ---
 
@@ -31,17 +50,17 @@ The factory deploys one implementation contract per token type at construction a
 createToken / createTT / createRFL
         │  (msg.value = creation fee + optional early buy)
         ▼
-  CREATE2 clone → initForLaunchpad()
-  • 100 % of supply minted to factory
-  • PancakeSwap pair created immediately (empty — no liquidity yet)
+  CREATE2 clone → initForLaunchpad(factory_ = address(bondingCurve))
+  • 100 % of supply minted to BondingCurve
+  • PancakeSwap pair created immediately (TAX/RFL tokens — empty, no liquidity yet)
   • _inBondingPhase = true  (taxes / reflection suppressed)
   • Creator vesting tokens transferred to token contract as self-escrow
         │
         ▼
-  Bonding-curve phase  (factory acts as AMM)
-  • buy()  — constant-product curve, antibot penalty on early blocks
-  • sell() — sell tokens back to factory for BNB
-  • Excess BNB above creation fee is used as an immediate buy
+  Bonding-curve phase  (BondingCurve acts as AMM)
+  • buy(token, minOut, deadline)    — user pays BNB, receives tokens
+  • sell(token, amount, minBNB, dl) — user sells tokens back for BNB
+  • Excess msg.value above creation fee used as an antibot-exempt early buy
         │
         ▼  raisedBNB ≥ migrationTarget
   Auto-migrate  (or call migrate() manually)
@@ -101,9 +120,20 @@ if bnbIn ≥ grossNeeded:
 
 ---
 
-## Factory Parameters
+## Trading Paths
 
-All bonding-curve parameters are set and maintained in **BNB wei** by the factory owner or managers. There is no on-chain price oracle — values are configured directly.
+| Path | Who approves | Deadline checked |
+|------|-------------|-----------------|
+| `BondingCurve.buy(token, minOut, deadline)` | — (payable) | BondingCurve |
+| `BondingCurve.sell(token, amount, minBNB, deadline)` | User approves **BondingCurve** | BondingCurve |
+| `LaunchpadFactory.buy(token, minOut, deadline)` | — (payable) | Factory |
+| `LaunchpadFactory.sell(token, amount, minBNB, deadline)` | User approves **Factory** | Factory |
+
+---
+
+## Parameters
+
+### Factory Parameters (LaunchpadFactory)
 
 | Parameter | Description |
 |-----------|-------------|
@@ -111,21 +141,34 @@ All bonding-curve parameters are set and maintained in **BNB wei** by the factor
 | `defaultVirtualBNB` | Virtual BNB seeded into the bonding curve in BNB wei |
 | `defaultMigrationTarget` | BNB that must be raised before DEX migration in BNB wei |
 
-- At launch time `virtualBNB` and `migrationTarget` are locked into `TokenConfig`. Subsequent owner/manager updates only affect future tokens.
-- Creators can override both values per-token via `BaseParams.customVirtualBNB` and `BaseParams.customMigrationTarget` in BNB wei (set to 0 to use factory defaults).
+- `virtualBNB` and `migrationTarget` are locked into each token's `TokenConfig` at creation. Subsequent updates only affect future tokens.
+
+### BondingCurve Parameters
+
+| Parameter | Description |
+|-----------|-------------|
+| `platformFee` | BPS — goes to `feeRecipient` on each trade |
+| `charityFee` | BPS — goes to `charityWallet` on each trade |
+| `feeRecipient` | Receives platform fees and creation fees |
+| `charityWallet` | Receives charity portion; `address(0)` redirects to `feeRecipient` |
+| `pancakeRouter` | PancakeSwap V2 router; snapshotted per-token at creation |
+
+All BondingCurve parameters are updated through the factory using 48-hour timelocks.
 
 ---
 
 ## Fee Distribution
 
-All fees (creation fee and per-trade fees) are dispatched **immediately** — nothing is held in the factory.
+All fees are dispatched **immediately** — nothing is held in either contract.
 
 ```
 totalFeeBPS = platformFee + charityFee   (max 250 BPS = 2.5 %)
 
-fee = bnbIn × totalFeeBPS / 10000
+tradeFee = bnbIn × totalFeeBPS / 10000
   └─ charityWallet  ← fee × charityFee / totalFeeBPS
   └─ feeRecipient   ← remainder
+
+creationFee → feeRecipient  (collected at token launch)
 ```
 
 | Recipient | Condition |
@@ -133,10 +176,23 @@ fee = bnbIn × totalFeeBPS / 10000
 | `charityWallet` | `charityFee` BPS share (if charity wallet is set and `charityFee > 0`) |
 | `feeRecipient` | remainder (100 % if no charity wallet or `charityFee == 0`) |
 
-- `feeRecipient` and `owner` are distinct addresses.
-- `charityWallet` defaults to `address(0)` (disabled). Set via `setCharityWallet`.
-- The combined `platformFee + charityFee` may not exceed 250 BPS (2.5 %).
-- Managers may update `creationFee` and default bonding-curve params but cannot change fee routing addresses.
+The combined `platformFee + charityFee` may not exceed 250 BPS (2.5 %).
+
+---
+
+## Timelock
+
+All BondingCurve configuration changes are routed through the factory with a **48-hour timelock** using a propose → execute pattern.
+
+| Action | Timelock ID |
+|--------|-------------|
+| Update PancakeSwap router | `keccak256("SET_ROUTER")` |
+| Update platform fee | `keccak256("SET_PLATFORM_FEE")` |
+| Update charity fee | `keccak256("SET_CHARITY_FEE")` |
+| Update fee recipient | `keccak256("SET_FEE_RECIPIENT")` |
+| Update charity wallet | `keccak256("SET_CHARITY_WALLET")` |
+
+Any queued action can be cancelled by the owner before execution.
 
 ---
 
@@ -144,10 +200,9 @@ fee = bnbIn × totalFeeBPS / 10000
 
 Managers are addresses granted limited admin rights by the owner. A manager can call:
 
-- `setCreationFee(bnbWei)`
-- `setDefaultParams(virtualBNB, migrationTarget)`
+- `setDefaultParams(virtualBNB, migrationTarget)` on the factory
 
-All other admin functions (`setPlatformFee`, `setCharityFee`, `setFeeRecipient`, `setCharityWallet`, `setRouter`, ownership transfer, `rescueBNB`) remain owner-only.
+All other admin functions (timelocked BondingCurve config, ownership transfer) remain owner-only.
 
 ---
 
@@ -171,14 +226,13 @@ tokensToDeadWallet = tokensOut × penaltyBPS / 10000
 
 - Optional 5 % allocation, linear vest over **12 months**.
 - The token contract itself acts as the vesting escrow — no separate contract required.
-- Factory transfers creator tokens to the token contract and calls `setupVesting` atomically at launch.
-- **Claimable by the current token owner.** Ownership transfer passes vesting rights to the new owner. `vestingCreator` is stored for transparency only.
-- Vesting tokens are tracked separately (`_vestingBalance`) and are never consumed by `swapAndDistribute`.
+- BondingCurve transfers creator tokens to the token contract and calls `setupVesting` atomically at launch.
+- **Claimable by the current token owner.** Ownership transfer passes vesting rights to the new owner.
 
 ```solidity
-token.claimVesting();            // msg.sender must be current owner
-token.claimableVesting();        // view: tokens available now
-token.transferOwnership(addr);   // new owner inherits vesting rights
+token.claimVesting();         // msg.sender must be current owner
+token.claimableVesting();     // view: tokens available now
+token.transferOwnership(addr); // new owner inherits vesting rights
 ```
 
 ---
@@ -192,7 +246,7 @@ The on-chain CREATE2 salt is `keccak256(abi.encode(msg.sender, userSalt))`, bind
 **Off-chain salt mining (JavaScript):**
 
 ```js
-// Choose the implementation address that matches the token type you want to create:
+// Choose the implementation address for the token type you want to create:
 //   factory.standardImpl()    → createToken()
 //   factory.taxImpl()         → createTT()
 //   factory.reflectionImpl()  → createRFL()
@@ -205,30 +259,24 @@ for (let n = 0n; ; n++) {
   if (addr.toLowerCase().endsWith("1111")) break;
 }
 
-// StandardToken — salt lives directly in BaseParams
+// StandardToken
 await factory.createToken(
   { name, symbol, supplyOption, enableCreatorAlloc, enableAntibot, antibotBlocks,
-    customVirtualBNB, customMigrationTarget, metaURI, salt: userSalt },
+    metaURI, salt: userSalt },
   { value: creationFee }
 );
 
-// TaxToken — salt is nested inside base
+// TaxToken
 await factory.createTT(
-  { base: { name, symbol, supplyOption, enableCreatorAlloc, enableAntibot, antibotBlocks,
-             customVirtualBNB, customMigrationTarget, metaURI, salt: userSalt },
-    wallets: [marketingAddr, teamAddr, treasuryAddr],
-    buyTaxes:  [mktBps, teamBps, trsyBps, burnBps, lpBps],
-    sellTaxes: [mktBps, teamBps, trsyBps, burnBps, lpBps],
-    swapThreshold },
+  { name, symbol, metaURI, supplyOption, enableCreatorAlloc, enableAntibot,
+    antibotBlocks, salt: userSalt },
   { value: creationFee }
 );
 
-// ReflectionToken — salt is nested inside base; taxes are set post-deployment
+// ReflectionToken
 await factory.createRFL(
-  { base: { name, symbol, supplyOption, enableCreatorAlloc, enableAntibot, antibotBlocks,
-             customVirtualBNB, customMigrationTarget, metaURI, salt: userSalt },
-    wallets: [marketingAddr, teamAddr],
-    swapThreshold },
+  { name, symbol, metaURI, supplyOption, enableCreatorAlloc, enableAntibot,
+    antibotBlocks, salt: userSalt },
   { value: creationFee }
 );
 ```
@@ -265,45 +313,68 @@ RFI-style passive reflection plus optional custom reflection token distribution.
 
 ## Deployment
 
-### Factory Constructor
+### 1. Deploy BondingCurve
 
 ```solidity
 constructor(
-    address router_,                  // PancakeSwap V2 router
-    address feeRecipient_,            // receives platform fees
-    uint256 creationFee_,             // BNB wei (may be 0)
-    uint256 platformFee_,             // BPS → feeRecipient
-    uint256 charityFee_,              // BPS → charityWallet
-    uint256 defaultVirtualBNB_,       // BNB wei
-    uint256 defaultMigrationTarget_   // BNB wei
+    address factory_,       // set to address(0) initially, or use a 2-step deploy
+    address router_,        // PancakeSwap V2 router
+    address feeRecipient_,  // receives platform and creation fees
+    uint256 platformFee_,   // BPS → feeRecipient
+    uint256 charityFee_     // BPS → charityWallet
 )
 ```
 
 `platformFee_ + charityFee_` must not exceed 250 BPS (2.5 %).
 
-### Owner Administration
+### 2. Deploy LaunchpadFactory
+
+```solidity
+constructor(
+    address bondingCurve_,           // deployed BondingCurve
+    uint256 creationFee_,             // BNB wei (may be 0)
+    uint256 defaultVirtualBNB_,       // BNB wei
+    uint256 defaultMigrationTarget_   // BNB wei
+)
+```
+
+The factory deploys the three implementation contracts (`StandardToken`, `TaxToken`, `ReflectionToken`) in its constructor.
+
+### 3. Update BondingCurve factory pointer
+
+Call `BondingCurve.setFactory(address(launchpadFactory))` — this must be done once before any tokens are launched.
+
+---
+
+## Owner Administration
+
+### Factory (instant)
 
 | Function | Description |
 |----------|-------------|
-| `setCreationFee(bnbWei)` | Update creation fee in BNB wei (may be 0) — owner or manager |
-| `setPlatformFee(bps)` | Update platform fee BPS — combined total must stay ≤ 250 BPS |
-| `setCharityFee(bps)` | Update charity fee BPS — combined total must stay ≤ 250 BPS |
-| `setDefaultParams(virtualBNB, migrationTarget)` | Update default bonding-curve parameters in BNB wei — owner or manager |
-| `setRouter(addr)` | Update PancakeSwap V2 router |
-| `setFeeRecipient(addr)` | Update fee recipient address |
-| `setCharityWallet(addr)` | Set charity wallet; `address(0)` disables the split (all fees go to `feeRecipient`) |
-| `addManager(addr)` | Grant manager role (may update creation fee and default params) |
+| `setCreationFee(bnbWei)` | Update creation fee — owner only |
+| `setDefaultParams(virtualBNB, migrationTarget)` | Update default bonding-curve parameters — owner or manager |
+| `addManager(addr)` | Grant manager role |
 | `removeManager(addr)` | Revoke manager role |
-| `managers(addr)` | View — returns `true` if address holds manager role |
-| `transferOwnership(addr)` | Propose ownership transfer (two-step; candidate calls `acceptOwnership()`) |
-| `acceptOwnership()` | Pending owner confirms the proposed transfer |
-| `rescueBNB()` | Sweep stray BNB (not accounted for by any active pool) to `feeRecipient` |
+| `transferOwnership(addr)` | Propose two-step ownership transfer |
+| `acceptOwnership()` | Pending owner confirms the transfer |
+| `cancelAction(bytes32)` | Cancel a queued timelock action |
+
+### BondingCurve Config (48h timelock, via factory)
+
+| Propose | Execute | Description |
+|---------|---------|-------------|
+| `proposeSetRouter(addr)` | `executeSetRouter()` | Update PancakeSwap router |
+| `proposeSetPlatformFee(bps)` | `executeSetPlatformFee()` | Update platform fee BPS |
+| `proposeSetCharityFee(bps)` | `executeSetCharityFee()` | Update charity fee BPS |
+| `proposeSetFeeRecipient(addr)` | `executeSetFeeRecipient()` | Update fee recipient |
+| `proposeSetCharityWallet(addr)` | `executeSetCharityWallet()` | Set charity wallet (0x0 to disable) |
 
 ---
 
 ## Key View Functions
 
-### Token Registry
+### On BondingCurve
 
 | Function | Returns |
 |----------|---------|
@@ -311,16 +382,18 @@ constructor(
 | `allTokens(i)` | Token address at index `i` |
 | `getTokensByCreator(addr)` | All tokens launched by `addr` |
 | `tokenCountByCreator(addr)` | Token count for `addr` |
-| `tokens(addr)` | Full `TokenConfig` struct (includes `pair` address) |
-
-### AMM Quotes
-
-| Function | Returns |
-|----------|---------|
+| `tokens(addr)` | Full `TokenConfig` struct |
 | `getAmountOut(token, bnbIn)` | `(tokensOut, feeBNB)` — buy quote, migration-cap aware |
 | `getAmountOutSell(token, tokensIn)` | `(bnbOut, feeBNB)` — sell quote |
 | `getSpotPrice(token)` | BNB per whole token ×1e18 |
+
+### On LaunchpadFactory
+
+| Function | Returns |
+|----------|---------|
 | `predictTokenAddress(creator, salt, impl)` | Off-chain vanity salt mining helper |
+| `bondingCurve()` | Immutable BondingCurve address |
+| `timelockExpiry(bytes32)` | Unix timestamp when a queued action unlocks |
 
 ---
 
@@ -328,18 +401,32 @@ constructor(
 
 | Parameter | Value |
 |-----------|-------|
-| Creation fee | BNB wei — default `0.0011 ether`, set by factory owner/manager |
+| Creation fee | BNB wei — default `0.0011 ether`, set by factory owner |
 | Max total trade fee | 2.5 % (250 BPS) |
 | Default virtual BNB | BNB wei — set by factory owner/manager |
 | Default migration target | BNB wei — set by factory owner/manager |
+| Timelock delay | 48 hours |
 | Vesting duration | 365 days linear |
 | Max buy/sell tax | 10 % (1 000 BPS) per side |
-| Min swap threshold | 0.02 % of token total supply (floor; enforced at creation and via setter) |
+| Min swap threshold | 0.02 % of token total supply |
 | Reflection token default taxes | 0 % — owner configures post-deployment |
 | Reflection minimum balance | 0.1 % of total supply (floor; owner may only raise) |
 | Antibot range | 10–199 blocks |
 | LP lock destination | `0x000…dEaD` (permanent) |
 | Vanity address suffix | `0x1111` (last 4 hex digits) |
+| Compiler | `solc ^0.8.32` with `viaIR: true`, `optimizer: 200 runs` |
+
+---
+
+## Core Management Dashboard
+
+Open [`coremanagement/index.html`](coremanagement/index.html) in a browser. Connect MetaMask on BSC and paste the LaunchpadFactory address to:
+
+- View factory and BondingCurve state side-by-side
+- Set creation fee and default bonding-curve parameters
+- Propose and execute timelocked BondingCurve configuration changes
+- Manage the owner and manager roles
+- Browse the token registry (reads directly from BondingCurve)
 
 ---
 

@@ -63,8 +63,11 @@ contract StandardToken is ILaunchpadToken {
     event VestingSetup(address indexed creator, uint256 amount);
     event VestingClaimed(address indexed owner, uint256 amount);
 
-    modifier onlyFactory() { if (msg.sender != factory) revert NotFactory(); _; }
-    modifier onlyOwner()   { if (msg.sender != _owner)  revert NotOwner();   _; }
+    address public bondingCurve;
+
+    modifier onlyFactory()        { if (msg.sender != factory)      revert NotFactory(); _; }
+    modifier onlyFactoryOrCurve() { if (msg.sender != factory && msg.sender != bondingCurve) revert NotFactory(); _; }
+    modifier onlyOwner()          { if (msg.sender != _owner)       revert NotOwner();   _; }
 
     /// @dev Prevents direct initialization of the implementation contract.
     constructor() { _initialized = true; }
@@ -85,15 +88,18 @@ contract StandardToken is ILaunchpadToken {
         string  calldata symbol_,
         uint256          totalSupply_,
         address          factory_,
+        address          bondingCurve_,
         address          tokenOwner_,
         string  calldata metaURI_
     ) external {
-        if (_initialized)              revert AlreadyInitialized();
-        if (factory_    == address(0)) revert ZeroAddress();
-        if (tokenOwner_ == address(0)) revert ZeroAddress();
+        if (_initialized)               revert AlreadyInitialized();
+        if (factory_      == address(0)) revert ZeroAddress();
+        if (bondingCurve_ == address(0)) revert ZeroAddress();
+        if (tokenOwner_   == address(0)) revert ZeroAddress();
         _initialized = true;
 
         factory      = factory_;
+        bondingCurve = bondingCurve_;
         _owner       = tokenOwner_;
         _name        = name_;
         _symbol      = symbol_;
@@ -120,6 +126,9 @@ contract StandardToken is ILaunchpadToken {
         _metaURI = uri_;
         emit MetaURIUpdated(uri_);
     }
+
+    /// @notice No-op on StandardToken — no taxes to enable.  Satisfies ILaunchpadToken.
+    function postMigrateSetup() external override onlyFactoryOrCurve {}
 
     /**
      * @notice Called once by the factory after it has transferred the creator

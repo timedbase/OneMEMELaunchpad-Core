@@ -65,6 +65,7 @@ contract TaxToken is ILaunchpadToken {
 
     address private _owner;
     address private _factory;
+    address private _bondingCurve;
     bool    private _initialized;
     bool    private _inBondingPhase;
 
@@ -138,7 +139,8 @@ contract TaxToken is ILaunchpadToken {
 
     modifier lockSwap()   { inSwap = true; _; inSwap = false; }
     modifier onlyOwner()  { if (msg.sender != _owner)   revert NotOwner();   _; }
-    modifier onlyFactory(){ if (msg.sender != _factory) revert NotFactory(); _; }
+    modifier onlyFactory()        { if (msg.sender != _factory) revert NotFactory(); _; }
+    modifier onlyFactoryOrCurve() { if (msg.sender != _factory && msg.sender != _bondingCurve) revert NotFactory(); _; }
 
     /// @dev Prevents direct initialization of the implementation contract.
     constructor() { _initialized = true; }
@@ -160,18 +162,21 @@ contract TaxToken is ILaunchpadToken {
         string    calldata symbol_,
         uint256            totalSupply_,
         address            factory_,
+        address            bondingCurve_,
         address            tokenOwner_,
         string    calldata metaURI_,
         address            router_
     ) external {
-        if (_initialized) revert AlreadyInitialized();
-        if (factory_    == address(0)) revert ZeroAddress();
-        if (tokenOwner_ == address(0)) revert ZeroAddress();
-        if (router_     == address(0)) revert ZeroAddress();
+        if (_initialized)               revert AlreadyInitialized();
+        if (factory_      == address(0)) revert ZeroAddress();
+        if (bondingCurve_ == address(0)) revert ZeroAddress();
+        if (tokenOwner_   == address(0)) revert ZeroAddress();
+        if (router_       == address(0)) revert ZeroAddress();
 
         _initialized    = true;
         _inBondingPhase = true;
         _factory        = factory_;
+        _bondingCurve   = bondingCurve_;
         _owner          = tokenOwner_;
 
         _name        = name_;
@@ -190,6 +195,7 @@ contract TaxToken is ILaunchpadToken {
         swapEnabled   = false;
 
         _isExcludedFromFee[factory_]       = true;
+        _isExcludedFromFee[bondingCurve_]  = true;
         _isExcludedFromFee[tokenOwner_]    = true;
         _isExcludedFromFee[address(this)]  = true;
         _isExcludedFromFee[BURN_ADDRESS]   = true;
@@ -228,7 +234,7 @@ contract TaxToken is ILaunchpadToken {
      *         Router and pair are already set from initForLaunchpad; this simply
      *         exits the bonding phase and enables normal tax/swap behaviour.
      */
-    function postMigrateSetup() external onlyFactory {
+    function postMigrateSetup() external onlyFactoryOrCurve {
         if (!_inBondingPhase) revert DexAlreadyConfigured();
         _inBondingPhase = false;
         swapEnabled     = true;

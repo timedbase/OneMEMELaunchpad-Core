@@ -1,0 +1,9 @@
+{
+  "scripts": {
+    "compile": "node compile.js",
+    "compile:verbose": "node compile.js --verbose"
+  },
+  "dependencies": {
+    "solc": "^0.8.32"
+  }
+}
