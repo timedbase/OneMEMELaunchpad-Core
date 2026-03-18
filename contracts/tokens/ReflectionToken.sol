@@ -160,7 +160,6 @@ contract ReflectionToken is ILaunchpadToken {
     modifier onlyFactory()        { if (msg.sender != _factory) revert NotFactory(); _; }
     modifier onlyFactoryOrCurve() { if (msg.sender != _factory && msg.sender != _migrator) revert NotFactory(); _; }
 
-    // Prevents direct initialization of the implementation contract.
     constructor() { _initialized = true; }
 
     function initForLaunchpad(

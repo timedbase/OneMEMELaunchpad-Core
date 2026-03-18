@@ -57,7 +57,6 @@ contract StandardToken is ILaunchpadToken {
     modifier onlyFactoryOrCurve() { if (msg.sender != factory && msg.sender != migrator) revert NotFactory(); _; }
     modifier onlyOwner()          { if (msg.sender != _owner)       revert NotOwner();   _; }
 
-    // Prevents direct initialization of the implementation contract.
     constructor() { _initialized = true; }
 
     function initForLaunchpad(
@@ -98,7 +97,6 @@ contract StandardToken is ILaunchpadToken {
         emit MetaURIUpdated(uri_);
     }
 
-    // No-op on StandardToken — satisfies ILaunchpadToken interface.
     function postMigrateSetup() external override onlyFactoryOrCurve {}
 
     function owner() external view returns (address) { return _owner; }

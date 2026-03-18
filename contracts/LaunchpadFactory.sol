@@ -152,6 +152,7 @@ contract LaunchpadFactory {
     event ManagerRemoved(address indexed manager);
     event OwnershipTransferProposed(address indexed current, address indexed proposed);
     event OwnershipTransferred(address indexed prev, address indexed next);
+    event VestingWalletUpdated(address indexed prev, address indexed next);
     event TimelockQueued(bytes32 indexed actionId, uint256 executeAfter);
     event TimelockExecuted(bytes32 indexed actionId);
     event TimelockCancelled(bytes32 indexed actionId);
@@ -371,10 +372,9 @@ contract LaunchpadFactory {
         emit TimelockCancelled(actionId);
     }
 
-    // Can only be called once (when vestingWallet is zero).
     function setVestingWallet(address vestingWallet_) external onlyOwner {
-        if (vestingWallet != address(0)) revert Unauthorized();
         if (vestingWallet_ == address(0)) revert ZeroAddress();
+        emit VestingWalletUpdated(vestingWallet, vestingWallet_);
         vestingWallet = vestingWallet_;
     }
 

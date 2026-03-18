@@ -34,6 +34,7 @@ contract VestingWallet {
     event Claimed(address indexed token, address indexed beneficiary, uint256 amount);
     event VestingVoided(address indexed token, address indexed beneficiary, uint256 burned);
     event OwnershipTransferred(address indexed prev, address indexed next);
+    event FactoryUpdated(address indexed prev, address indexed next);
 
     modifier onlyOwner() { if (msg.sender != owner) revert NotOwner(); _; }
 
@@ -78,6 +79,12 @@ contract VestingWallet {
             if (!ok) revert TransferFailed();
         }
         emit VestingVoided(token, beneficiary, remaining);
+    }
+
+    function setFactory(address factory_) external onlyOwner {
+        if (factory_ == address(0)) revert ZeroAddress();
+        emit FactoryUpdated(factory, factory_);
+        factory = factory_;
     }
 
     function transferOwnership(address newOwner) external onlyOwner {

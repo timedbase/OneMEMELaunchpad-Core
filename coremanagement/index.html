@@ -397,6 +397,12 @@ const BC_ABI = [
   'function migrate(address)',
 ];
 
+const VW_ABI = [
+  'function owner() view returns (address)',
+  'function factory() view returns (address)',
+  'function setFactory(address)',
+];
+
 const ERC20_ABI = [
   'function name() view returns (string)',
   'function symbol() view returns (string)',
@@ -1098,9 +1104,14 @@ async function refreshAdmin() {
   const isPending = walletAddress && pending && pending !== ethers.ZeroAddress && pending.toLowerCase() === walletAddress.toLowerCase();
   let bcDeployer = '';
   let vestingWalletCurrent = ethers.ZeroAddress;
+  let vwOwner = '';
   try { [bcDeployer, vestingWalletCurrent] = await Promise.all([bcContract.deployer(), factoryContract.vestingWallet()]); } catch {}
   const isDeployer = walletAddress && bcDeployer && bcDeployer.toLowerCase() === walletAddress.toLowerCase();
   const vestingSet = vestingWalletCurrent && vestingWalletCurrent !== ethers.ZeroAddress;
+  if (vestingSet) {
+    try { vwOwner = await new ethers.Contract(vestingWalletCurrent, VW_ABI, provider).owner(); } catch {}
+  }
+  const isVwOwner = walletAddress && vwOwner && vwOwner.toLowerCase() === walletAddress.toLowerCase();
 
   // Build timelock data
   const tlData = {};
@@ -1225,10 +1236,10 @@ async function refreshAdmin() {
           ${!isOwner?'<div class="owner-overlay"><span class="badge muted">Owner only</span></div>':''}
           <div class="admin-card-header">Set Vesting Wallet <small style="font-size:10px;color:var(--muted);">Factory</small></div>
           <div class="admin-card-body">
-            ${vestingSet ? `<div class="tl-strip ready" style="margin-bottom:10px;">Already set: <span class="mono">${esc(short(vestingWalletCurrent))}</span></div>` : '<div class="tl-strip pending" style="margin-bottom:10px;">Not yet configured</div>'}
+            ${vestingSet ? `<div class="tl-strip ready" style="margin-bottom:10px;">Current: <span class="mono">${esc(short(vestingWalletCurrent))}</span></div>` : '<div class="tl-strip pending" style="margin-bottom:10px;">Not yet configured</div>'}
             <div class="form-row">
               <div class="form-group"><label class="form-label">VestingWallet address</label><input type="text" id="newVestingWallet" placeholder="0x…" class="mono" /></div>
-              <button class="btn" onclick="setVestingWallet()" ${!isOwner||vestingSet?'disabled':''}>Set</button>
+              <button class="btn" onclick="setVestingWallet()" ${!isOwner?'disabled':''}>Update</button>
             </div>
           </div>
         </div>
@@ -1240,6 +1251,17 @@ async function refreshAdmin() {
             <div class="form-row">
               <div class="form-group"><label class="form-label">New factory address</label><input type="text" id="newBcFactory" placeholder="0x…" class="mono" /></div>
               <button class="btn" onclick="setBcFactory()" ${!isDeployer?'disabled':''}>Set</button>
+            </div>
+          </div>
+        </div>
+        <div class="admin-card ${!isVwOwner?'owner-gate':''}">
+          ${!isVwOwner?'<div class="owner-overlay"><span class="badge muted">VW Owner only</span></div>':''}
+          <div class="admin-card-header">Set Factory <small style="font-size:10px;color:var(--muted);">VestingWallet</small></div>
+          <div class="admin-card-body">
+            ${vestingSet ? `<div class="form-label" style="margin-bottom:6px;">VW Owner: <span class="mono" style="font-size:12px;">${esc(short(vwOwner))}</span> ${copyBtn(vwOwner)}</div>` : '<div class="tl-strip pending" style="margin-bottom:10px;">VestingWallet not set</div>'}
+            <div class="form-row">
+              <div class="form-group"><label class="form-label">New factory address</label><input type="text" id="newVwFactory" placeholder="0x…" class="mono" /></div>
+              <button class="btn" onclick="setVwFactory()" ${!isVwOwner||!vestingSet?'disabled':''}>Set</button>
             </div>
           </div>
         </div>
@@ -1399,6 +1421,19 @@ async function setBcFactory() {
     const tx = await bc.setFactory(addr);
     toast('Tx sent…','warn',8000); await tx.wait();
     toast('Factory updated on BondingCurve','ok'); await refreshAll();
+  } catch(e) { toast('Failed: '+(e.reason||e.message||e),'danger'); }
+}
+
+async function setVwFactory() {
+  if (!signer) { toast('Connect wallet','warn'); return; }
+  const addr = document.getElementById('newVwFactory').value.trim();
+  if (!ethers.isAddress(addr)) { toast('Invalid address','danger'); return; }
+  if (!confirm(`Set VestingWallet factory to ${addr}?`)) return;
+  try {
+    const vw = new ethers.Contract(await factoryContract.vestingWallet(), VW_ABI, signer);
+    const tx = await vw.setFactory(addr);
+    toast('Tx sent…','warn',8000); await tx.wait();
+    toast('Factory updated on VestingWallet','ok'); await refreshAll();
   } catch(e) { toast('Failed: '+(e.reason||e.message||e),'danger'); }
 }
 
