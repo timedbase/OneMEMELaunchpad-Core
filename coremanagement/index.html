@@ -340,7 +340,7 @@
 const FACTORY_ABI = [
   'function owner() view returns (address)',
   'function pendingOwner() view returns (address)',
-  'function bondingCurve() view returns (address)',
+  'function migrator() view returns (address)',
   'function creationFee() view returns (uint256)',
   'function defaultVirtualBNB() view returns (uint256)',
   'function defaultMigrationTarget() view returns (uint256)',
@@ -557,7 +557,7 @@ async function loadFactory() {
     // signer from wallet if connected
     if (!signer) { document.getElementById('readonlyNote').style.display = 'inline'; }
     factoryContract = new ethers.Contract(factoryAddr, FACTORY_ABI, signer || provider);
-    bcAddr = await factoryContract.bondingCurve();
+    bcAddr = await factoryContract.migrator();
     bcContract = new ethers.Contract(bcAddr, BC_ABI, signer || provider);
     await refreshAll();
     toast('Factory loaded', 'ok');
@@ -609,7 +609,7 @@ async function refreshOverview() {
     h += statCard('Tax Impl', short(taxImpl), taxImpl);
     h += statCard('Reflection Impl', short(reflImpl), reflImpl);
     h += statCard('Vesting Wallet', vestingWalletAddr && vestingWalletAddr !== ethers.ZeroAddress ? short(vestingWalletAddr) : '⚠ Not set', vestingWalletAddr);
-    h += statCard('BondingCurve', short(bcAddr), bcAddr);
+    h += statCard('Migrator', short(bcAddr), bcAddr);
     fStats.innerHTML = h;
 
     const bcStats = document.getElementById('bcStats');

@@ -13,7 +13,6 @@ interface IVestingWallet {
     function addVesting(address token, address beneficiary, uint256 amount) external;
 }
 
-// Minimal init interfaces — token implementations are deployed independently.
 interface IStdInit {
     function initForLaunchpad(
         string memory name_, string memory symbol_, uint256 totalSupply_,
@@ -30,55 +29,7 @@ interface ITaxRflInit {
     function pancakePair() external view returns (address);
 }
 
-/**
- * @title LaunchpadFactory — OneMEME
- * @notice Creates meme-token clones (Standard / Tax / Reflection) and registers them
- *         with the BondingCurve contract where all trading state lives.
- *
- * ─── Separation of concerns ────────────────────────────────────────────────
- *   LaunchpadFactory  —  token creation, clone deployment, owner/manager admin,
- *                        default bonding-curve parameters, creation-fee collection,
- *                        timelocked updates to BondingCurve configuration,
- *                        convenience buy/sell/migrate pass-throughs.
- *
- *   BondingCurve      —  all per-token AMM state, buy/sell/migrate execution,
- *                        trade-fee collection and dispatch, DEX migration.
- *
- * ─── Token creation ────────────────────────────────────────────────────────
- *   initForLaunchpad is called with factory_ = address(this) so the token mints
- *   its entire supply to LaunchpadFactory.  The factory then transfers liq + BC
- *   tokens to BondingCurve, and creator tokens (if any) to VestingWallet.
- *
- * ─── Trading pass-throughs ─────────────────────────────────────────────────
- *   factory.buy()   → bondingCurve.buyFor()       (factory checks deadline)
- *   factory.sell()  → token.transferFrom + bondingCurve.completeSell()
- *   factory.migrate() → bondingCurve.migrate()
- *   Users may also interact with BondingCurve directly.
- *   For direct sells, users approve BondingCurve (not Factory).
- *   For factory-routed sells, users approve Factory (Factory transfers to BC).
- *
- * ─── Supply options (18 decimals) ─────────────────────────────────────────
- *   ONE      =           1 × 10^18
- *   THOUSAND =       1,000 × 10^18
- *   MILLION  =   1,000,000 × 10^18
- *   BILLION  = 1,000,000,000 × 10^18
- *
- * ─── Token distribution ───────────────────────────────────────────────────
- *   38 %  liquidity  (added to DEX at migration, LP permanently locked)
- *    5 %  creator    (optional, 12-month linear vest inside token contract)
- *   57 %  bonding curve  (if creator allocation enabled)
- *   62 %  bonding curve  (if no creator allocation)
- *
- * ─── Vanity addresses ─────────────────────────────────────────────────────
- *   Every clone is deployed via CREATE2 with a user-provided salt bound to
- *   msg.sender.  The resulting address must end in 0x1111.
- *   Mine off-chain: predictTokenAddress(creator, salt, impl) until match.
- */
 contract LaunchpadFactory {
-
-    // ─────────────────────────────────────────────────────────────────────
-    // TYPES
-    // ─────────────────────────────────────────────────────────────────────
 
     enum SupplyOption { ONE, THOUSAND, MILLION, BILLION }
 
@@ -95,7 +46,7 @@ contract LaunchpadFactory {
         SupplyOption supplyOption;
         bool         enableCreatorAlloc;
         bool         enableAntibot;
-        uint256      antibotBlocks;    // 10 – 199; ignored if antibot disabled
+        uint256      antibotBlocks;
         string       metaURI;
         bytes32      salt;
     }
@@ -122,24 +73,15 @@ contract LaunchpadFactory {
         bytes32      salt;
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // CONSTANTS
-    // ─────────────────────────────────────────────────────────────────────
-
     uint256 private constant LIQUIDITY_BPS = 3800;
     uint256 private constant CREATOR_BPS   =  500;
     uint256 private constant BPS_DENOM     = 10_000;
     uint256 private constant MAX_TOTAL_FEE =  250;  // 2.5 %
 
-    /// @notice Suggested default creation fee: 0.0011 BNB.
     uint256 public  constant DEFAULT_CREATION_FEE = 0.0011 ether;
 
     uint256 private constant _NOT_ENTERED = 1;
     uint256 private constant _ENTERED     = 2;
-
-    // ─────────────────────────────────────────────────────────────────────
-    // STATE
-    // ─────────────────────────────────────────────────────────────────────
 
     address public owner;
     address public pendingOwner;
@@ -149,16 +91,15 @@ contract LaunchpadFactory {
     address public immutable taxImpl;
     address public immutable reflectionImpl;
 
-    BondingCurve public immutable bondingCurve;
+    BondingCurve public immutable migrator;
     address public vestingWallet;
 
-    uint256 public creationFee;            // BNB wei — collected at token creation
-    uint256 public defaultVirtualBNB;      // BNB wei — passed to BondingCurve at registration
-    uint256 public defaultMigrationTarget; // BNB wei — passed to BondingCurve at registration
+    uint256 public creationFee;
+    uint256 public defaultVirtualBNB;
+    uint256 public defaultMigrationTarget;
 
     uint256 private _status;
 
-    // ─── Timelock ─────────────────────────────────────────────────────────
     uint256 public constant TIMELOCK_DELAY = 48 hours;
 
     bytes32 public constant TL_SET_ROUTER         = keccak256("SET_ROUTER");
@@ -175,10 +116,6 @@ contract LaunchpadFactory {
     address private _pendingFeeRecipient;
     address private _pendingCharityWallet;
 
-    // ─────────────────────────────────────────────────────────────────────
-    // ERRORS
-    // ─────────────────────────────────────────────────────────────────────
-
     error NotOwner();
     error NotPendingOwner();
     error Unauthorized();
@@ -194,10 +131,6 @@ contract LaunchpadFactory {
     error TimelockNotQueued();
     error TimelockNotExpired();
     error ParamOutOfRange();
-
-    // ─────────────────────────────────────────────────────────────────────
-    // EVENTS
-    // ─────────────────────────────────────────────────────────────────────
 
     event TokenCreated(
         address indexed token,
@@ -223,10 +156,6 @@ contract LaunchpadFactory {
     event TimelockExecuted(bytes32 indexed actionId);
     event TimelockCancelled(bytes32 indexed actionId);
 
-    // ─────────────────────────────────────────────────────────────────────
-    // MODIFIERS
-    // ─────────────────────────────────────────────────────────────────────
-
     modifier onlyOwner() { if (msg.sender != owner) revert NotOwner(); _; }
     modifier onlyOwnerOrManager() {
         if (msg.sender != owner && !managers[msg.sender]) revert Unauthorized();
@@ -239,12 +168,8 @@ contract LaunchpadFactory {
         _status = _NOT_ENTERED;
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // CONSTRUCTOR
-    // ─────────────────────────────────────────────────────────────────────
-
     constructor(
-        address bondingCurve_,
+        address migrator_,
         uint256 creationFee_,
         uint256 defaultVirtualBNB_,
         uint256 defaultMigrationTarget_,
@@ -253,7 +178,7 @@ contract LaunchpadFactory {
         address reflectionImpl_,
         address vestingWallet_
     ) {
-        if (bondingCurve_           == address(0)) revert ZeroAddress();
+        if (migrator_               == address(0)) revert ZeroAddress();
         if (defaultVirtualBNB_      == 0)          revert ZeroAmount();
         if (defaultMigrationTarget_ == 0)          revert ZeroAmount();
         if (standardImpl_           == address(0)) revert ZeroAddress();
@@ -261,7 +186,7 @@ contract LaunchpadFactory {
         if (reflectionImpl_         == address(0)) revert ZeroAddress();
 
         owner                  = msg.sender;
-        bondingCurve           = BondingCurve(payable(bondingCurve_));
+        migrator               = BondingCurve(payable(migrator_));
         creationFee            = creationFee_;
         defaultVirtualBNB      = defaultVirtualBNB_;
         defaultMigrationTarget = defaultMigrationTarget_;
@@ -273,17 +198,8 @@ contract LaunchpadFactory {
         vestingWallet  = vestingWallet_;
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // TOKEN CREATION
-    // ─────────────────────────────────────────────────────────────────────
-
-    /**
-     * @notice Create a Standard ERC-20 token and register it with the BondingCurve.
-     *         msg.value must cover the creation fee.  Any excess is used as an
-     *         antibot-exempt early buy executed atomically on the bonding curve.
-     */
     function createToken(BaseParams memory p) external payable nonReentrant returns (address token) {
-        BondingCurve bc  = bondingCurve;
+        BondingCurve bc  = migrator;
         uint256 earlyBuy = _collectCreationFee(bc);
         token = _cloneCreate2(standardImpl, p.salt);
 
@@ -293,7 +209,7 @@ contract LaunchpadFactory {
             IStdInit(token).initForLaunchpad(
                 p.name, p.symbol, a.supply, address(this), address(bc), msg.sender, p.metaURI
             );
-            _sendToBondingCurve(token, address(bc), a);
+            _distribute(token, address(bc), a);
             _registerWithCurve(bc, token, address(0), a, p.enableAntibot, p.antibotBlocks);
             tradingBlock_ = p.enableAntibot ? block.number + p.antibotBlocks : block.number;
             emit TokenCreated(token, msg.sender, a.supply,
@@ -303,12 +219,8 @@ contract LaunchpadFactory {
         if (earlyBuy > 0) bc.earlyBuy{value: earlyBuy}(token, msg.sender);
     }
 
-    /**
-     * @notice Create a Tax Token and register it with the BondingCurve.
-     *         Taxes start at 0 — configure via the token's setBuyTaxes / setSellTaxes.
-     */
     function createTT(CreateTTParams memory p) external payable nonReentrant returns (address payable token) {
-        BondingCurve bc  = bondingCurve;
+        BondingCurve bc  = migrator;
         uint256 earlyBuy = _collectCreationFee(bc);
         token = payable(_cloneCreate2(taxImpl, p.salt));
 
@@ -319,7 +231,7 @@ contract LaunchpadFactory {
                 p.name, p.symbol, a.supply, address(this), address(bc), msg.sender, p.metaURI,
                 bc.pancakeRouter(), vestingWallet
             );
-            _sendToBondingCurve(token, address(bc), a);
+            _distribute(token, address(bc), a);
             _registerWithCurve(bc, token, ITaxRflInit(token).pancakePair(), a, p.enableAntibot, p.antibotBlocks);
             tradingBlock_ = p.enableAntibot ? block.number + p.antibotBlocks : block.number;
             emit TokenCreated(token, msg.sender, a.supply,
@@ -329,12 +241,8 @@ contract LaunchpadFactory {
         if (earlyBuy > 0) bc.earlyBuy{value: earlyBuy}(token, msg.sender);
     }
 
-    /**
-     * @notice Create a Reflection Token and register it with the BondingCurve.
-     *         Taxes and reflection token start at 0 — configure post-deployment.
-     */
     function createRFL(CreateRFLParams memory p) external payable nonReentrant returns (address payable token) {
-        BondingCurve bc  = bondingCurve;
+        BondingCurve bc  = migrator;
         uint256 earlyBuy = _collectCreationFee(bc);
         token = payable(_cloneCreate2(reflectionImpl, p.salt));
 
@@ -345,7 +253,7 @@ contract LaunchpadFactory {
                 p.name, p.symbol, a.supply, address(this), address(bc), msg.sender, p.metaURI,
                 bc.pancakeRouter(), vestingWallet
             );
-            _sendToBondingCurve(token, address(bc), a);
+            _distribute(token, address(bc), a);
             _registerWithCurve(bc, token, ITaxRflInit(token).pancakePair(), a, p.enableAntibot, p.antibotBlocks);
             tradingBlock_ = p.enableAntibot ? block.number + p.antibotBlocks : block.number;
             emit TokenCreated(token, msg.sender, a.supply,
@@ -355,43 +263,26 @@ contract LaunchpadFactory {
         if (earlyBuy > 0) bc.earlyBuy{value: earlyBuy}(token, msg.sender);
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // PASS-THROUGH TRADING
-    // ─────────────────────────────────────────────────────────────────────
-
-    /// @notice Buy tokens via the bonding curve (factory-routed).
-    ///         Users may also call BondingCurve.buy() directly.
     function buy(address token_, uint256 minOut, uint256 deadline) external payable nonReentrant {
         if (block.timestamp > deadline) revert DeadlineExpired();
         if (msg.value == 0) revert ZeroAmount();
-        bondingCurve.buyFor{value: msg.value}(token_, msg.sender, minOut);
+        migrator.buyFor{value: msg.value}(token_, msg.sender, minOut);
     }
 
-    /**
-     * @notice Sell tokens via the bonding curve (factory-routed).
-     *         Caller must approve THIS contract for `amountIn` tokens.
-     *         For direct sells, approve BondingCurve and call BondingCurve.sell() directly.
-     */
     function sell(address token_, uint256 amountIn, uint256 minBNBOut, uint256 deadline)
         external nonReentrant
     {
         if (block.timestamp > deadline) revert DeadlineExpired();
         if (amountIn == 0) revert ZeroAmount();
-        address bc = address(bondingCurve);
+        address bc = address(migrator);
         IERC20Min(token_).transferFrom(msg.sender, bc, amountIn);
         BondingCurve(payable(bc)).completeSell(token_, msg.sender, amountIn, minBNBOut, deadline);
     }
 
-    /// @notice Trigger DEX migration for a completed bonding curve.  Permissionless.
     function migrate(address token_) external {
-        bondingCurve.migrate(token_);
+        migrator.migrate(token_);
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // ADMIN — DEFAULT PARAMS
-    // ─────────────────────────────────────────────────────────────────────
-
-    /// @notice Update the default bonding-curve parameters for future launches.
     function setDefaultParams(uint256 virtualBNB_, uint256 migrationTarget_) external onlyOwnerOrManager {
         if (virtualBNB_      == 0) revert ZeroAmount();
         if (migrationTarget_ == 0) revert ZeroAmount();
@@ -407,11 +298,6 @@ contract LaunchpadFactory {
         creationFee = fee_;
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // ADMIN — TIMELOCKED BONDING CURVE CONFIG
-    // ─────────────────────────────────────────────────────────────────────
-
-    /// @notice Propose a new PancakeSwap router.  Execute after 48 h.
     function proposeSetRouter(address router_) external onlyOwner {
         if (router_ == address(0)) revert ZeroAddress();
         address factory_ = IPancakeRouter02(router_).factory();
@@ -423,13 +309,12 @@ contract LaunchpadFactory {
 
     function executeSetRouter() external onlyOwner {
         _consumeAction(TL_SET_ROUTER);
-        emit RouterUpdated(bondingCurve.pancakeRouter(), _pendingRouter);
-        bondingCurve.setRouter(_pendingRouter);
+        emit RouterUpdated(migrator.pancakeRouter(), _pendingRouter);
+        migrator.setRouter(_pendingRouter);
     }
 
-    /// @notice Propose a new platform fee (bps).  Execute after 48 h.
     function proposeSetPlatformFee(uint256 fee_) external onlyOwner {
-        if (fee_ + bondingCurve.charityFee() > MAX_TOTAL_FEE) revert FeeExceedsMax();
+        if (fee_ + migrator.charityFee() > MAX_TOTAL_FEE) revert FeeExceedsMax();
         _pendingPlatformFee = fee_;
         _queueAction(TL_SET_PLATFORM_FEE);
     }
@@ -437,14 +322,13 @@ contract LaunchpadFactory {
     function executeSetPlatformFee() external onlyOwner {
         _consumeAction(TL_SET_PLATFORM_FEE);
         uint256 pf = _pendingPlatformFee;
-        if (pf + bondingCurve.charityFee() > MAX_TOTAL_FEE) revert FeeExceedsMax();
-        bondingCurve.setFees(pf, bondingCurve.charityFee());
+        if (pf + migrator.charityFee() > MAX_TOTAL_FEE) revert FeeExceedsMax();
+        migrator.setFees(pf, migrator.charityFee());
         emit PlatformFeeUpdated(pf);
     }
 
-    /// @notice Propose a new charity fee (bps).  Execute after 48 h.
     function proposeSetCharityFee(uint256 fee_) external onlyOwner {
-        if (bondingCurve.platformFee() + fee_ > MAX_TOTAL_FEE) revert FeeExceedsMax();
+        if (migrator.platformFee() + fee_ > MAX_TOTAL_FEE) revert FeeExceedsMax();
         _pendingCharityFee = fee_;
         _queueAction(TL_SET_CHARITY_FEE);
     }
@@ -452,12 +336,11 @@ contract LaunchpadFactory {
     function executeSetCharityFee() external onlyOwner {
         _consumeAction(TL_SET_CHARITY_FEE);
         uint256 cf = _pendingCharityFee;
-        if (bondingCurve.platformFee() + cf > MAX_TOTAL_FEE) revert FeeExceedsMax();
-        bondingCurve.setFees(bondingCurve.platformFee(), cf);
+        if (migrator.platformFee() + cf > MAX_TOTAL_FEE) revert FeeExceedsMax();
+        migrator.setFees(migrator.platformFee(), cf);
         emit CharityFeeUpdated(cf);
     }
 
-    /// @notice Propose a new fee recipient.  Execute after 48 h.
     function proposeSetFeeRecipient(address rec_) external onlyOwner {
         if (rec_ == address(0)) revert ZeroAddress();
         _pendingFeeRecipient = rec_;
@@ -466,14 +349,11 @@ contract LaunchpadFactory {
 
     function executeSetFeeRecipient() external onlyOwner {
         _consumeAction(TL_SET_FEE_RECIPIENT);
-        bondingCurve.setFeeRecipient(_pendingFeeRecipient);
+        migrator.setFeeRecipient(_pendingFeeRecipient);
         emit FeeRecipientUpdated(_pendingFeeRecipient);
     }
 
-    /**
-     * @notice Propose a new charity wallet.  Execute after 48 h.
-     *         Propose address(0) to redirect the charity portion to feeRecipient.
-     */
+    // Propose address(0) to redirect the charity portion to feeRecipient.
     function proposeSetCharityWallet(address wallet_) external onlyOwner {
         _pendingCharityWallet = wallet_;
         _queueAction(TL_SET_CHARITY_WALLET);
@@ -481,22 +361,17 @@ contract LaunchpadFactory {
 
     function executeSetCharityWallet() external onlyOwner {
         _consumeAction(TL_SET_CHARITY_WALLET);
-        bondingCurve.setCharityWallet(_pendingCharityWallet);
+        migrator.setCharityWallet(_pendingCharityWallet);
         emit CharityWalletUpdated(_pendingCharityWallet);
     }
 
-    /// @notice Cancel a queued timelock action before it executes.
     function cancelAction(bytes32 actionId) external onlyOwner {
         if (timelockExpiry[actionId] == 0) revert TimelockNotQueued();
         timelockExpiry[actionId] = 0;
         emit TimelockCancelled(actionId);
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // ADMIN — OWNERSHIP / MANAGERS
-    // ─────────────────────────────────────────────────────────────────────
-
-    /// @notice Set the VestingWallet address. Can only be called once (when vestingWallet is zero).
+    // Can only be called once (when vestingWallet is zero).
     function setVestingWallet(address vestingWallet_) external onlyOwner {
         if (vestingWallet != address(0)) revert Unauthorized();
         if (vestingWallet_ == address(0)) revert ZeroAddress();
@@ -528,12 +403,7 @@ contract LaunchpadFactory {
         emit ManagerRemoved(manager_);
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // INTERNAL HELPERS
-    // ─────────────────────────────────────────────────────────────────────
-
-    /// @dev Transfer (liqTokens + bcTokens) to BondingCurve; send creator tokens to VestingWallet.
-    function _sendToBondingCurve(address token, address bc, Alloc memory a) internal {
+    function _distribute(address token, address bc, Alloc memory a) internal {
         IERC20Min(token).transfer(bc, a.liqTokens + a.bcTokens);
         if (a.creatorTokens > 0) {
             address vw = vestingWallet;
@@ -542,7 +412,6 @@ contract LaunchpadFactory {
         }
     }
 
-    /// @dev Build RegisterParams and call bc.registerToken().
     function _registerWithCurve(
         BondingCurve bc,
         address token,
@@ -585,11 +454,8 @@ contract LaunchpadFactory {
         return 1_000_000_000e18;
     }
 
-    /**
-     * @dev Deploy an EIP-1167 minimal proxy via CREATE2.
-     *      Salt is bound to msg.sender to prevent cross-sender front-running.
-     *      The resulting address MUST end in 0x1111.
-     */
+    // Salt is bound to msg.sender to prevent cross-sender front-running.
+    // The resulting address must end in 0x1111 (vanity requirement).
     function _cloneCreate2(address implementation, bytes32 userSalt) internal returns (address instance) {
         bytes32 salt = keccak256(abi.encode(msg.sender, userSalt));
         assembly {
@@ -623,14 +489,6 @@ contract LaunchpadFactory {
         emit TimelockExecuted(actionId);
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // VIEW FUNCTIONS
-    // ─────────────────────────────────────────────────────────────────────
-
-    /**
-     * @notice Predict the CREATE2 address for a given creator, salt, and implementation.
-     *         Mine off-chain until the resulting address ends in 0x1111.
-     */
     function predictTokenAddress(address creator_, bytes32 userSalt_, address impl_)
         external view
         returns (address predicted)
@@ -656,10 +514,9 @@ contract LaunchpadFactory {
         return (10, 199);
     }
 
-    /// @notice Sweep stray BNB from the BondingCurve to `to` (anything above active pool totals).
     function rescueBNB(address to) external onlyOwner {
         if (to == address(0)) revert ZeroAddress();
-        bondingCurve.rescueBNB(to);
+        migrator.rescueBNB(to);
     }
 
     receive() external payable {}

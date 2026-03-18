@@ -30,7 +30,6 @@ interface IPancakeFactoryTT {
     function getPair(address tokenA, address tokenB)   external view returns (address);
 }
 
-/// @dev Minimal ERC-20 interface used only by rescueTokens().
 interface IERC20Rescue {
     function balanceOf(address account) external view returns (uint256);
     function transfer(address to, uint256 amount) external returns (bool);
@@ -38,7 +37,6 @@ interface IERC20Rescue {
 
 contract TaxToken is ILaunchpadToken {
 
-    // ─── errors ────────────────────────────────────────────────────────
     error NotOwner();
     error NotFactory();
     error AlreadyInitialized();
@@ -58,7 +56,7 @@ contract TaxToken is ILaunchpadToken {
 
     address private _owner;
     address private _factory;
-    address private _bondingCurve;
+    address private _migrator;
     bool    private _initialized;
     bool    private _inBondingPhase;
 
@@ -95,7 +93,6 @@ contract TaxToken is ILaunchpadToken {
     mapping(address => mapping(address => uint256)) private _allowances;
     mapping(address => bool)                        private _isExcludedFromFee;
 
-    // ─── EIP-2612 Permit ──────────────────────────────────────────────────
     bytes32 private constant PERMIT_TYPEHASH =
         keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)");
     mapping(address => uint256) public nonces;
@@ -121,28 +118,17 @@ contract TaxToken is ILaunchpadToken {
     modifier lockSwap()   { inSwap = true; _; inSwap = false; }
     modifier onlyOwner()  { if (msg.sender != _owner)   revert NotOwner();   _; }
     modifier onlyFactory()        { if (msg.sender != _factory) revert NotFactory(); _; }
-    modifier onlyFactoryOrCurve() { if (msg.sender != _factory && msg.sender != _bondingCurve) revert NotFactory(); _; }
+    modifier onlyFactoryOrCurve() { if (msg.sender != _factory && msg.sender != _migrator) revert NotFactory(); _; }
 
-    /// @dev Prevents direct initialization of the implementation contract.
+    // Prevents direct initialization of the implementation contract.
     constructor() { _initialized = true; }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // INIT
-    // ─────────────────────────────────────────────────────────────────────
-
-    /**
-     * @notice One-shot initialiser called by the factory immediately after clone
-     *         deployment.  All tokens minted to factory_.
-     *         Wallets default to tokenOwner_, all taxes start at 0 %,
-     *         swapThreshold defaults to 0.1 % of supply.
-     * @param router_  PancakeSwap V2 router — stored and used to create the pair immediately
-     */
     function initForLaunchpad(
         string    calldata name_,
         string    calldata symbol_,
         uint256            totalSupply_,
         address            factory_,
-        address            bondingCurve_,
+        address            migrator_,
         address            tokenOwner_,
         string    calldata metaURI_,
         address            router_,
@@ -150,14 +136,14 @@ contract TaxToken is ILaunchpadToken {
     ) external {
         if (_initialized)               revert AlreadyInitialized();
         if (factory_      == address(0)) revert ZeroAddress();
-        if (bondingCurve_ == address(0)) revert ZeroAddress();
+        if (migrator_ == address(0)) revert ZeroAddress();
         if (tokenOwner_   == address(0)) revert ZeroAddress();
         if (router_       == address(0)) revert ZeroAddress();
 
         _initialized    = true;
         _inBondingPhase = true;
         _factory        = factory_;
-        _bondingCurve   = bondingCurve_;
+        _migrator   = migrator_;
         _owner          = tokenOwner_;
 
         _name        = name_;
@@ -172,7 +158,7 @@ contract TaxToken is ILaunchpadToken {
         swapEnabled   = false;
 
         _isExcludedFromFee[factory_]       = true;
-        _isExcludedFromFee[bondingCurve_]  = true;
+        _isExcludedFromFee[migrator_]  = true;
         _isExcludedFromFee[tokenOwner_]    = true;
         _isExcludedFromFee[address(this)]  = true;
         _isExcludedFromFee[BURN_ADDRESS]   = true;
@@ -180,8 +166,7 @@ contract TaxToken is ILaunchpadToken {
 
         _metaURI = metaURI_;
 
-        // Store router and create the PancakeSwap pair immediately.
-        // Liquidity is added only at migration; during bonding phase the pair holds nothing.
+        // Pair is created now; liquidity is added only at migration.
         pancakeRouter = IPancakeRouter02TT(router_);
         pancakePair   = IPancakeFactoryTT(pancakeRouter.factory()).createPair(address(this), pancakeRouter.WETH());
         _isExcludedFromFee[pancakePair] = true;
@@ -194,10 +179,6 @@ contract TaxToken is ILaunchpadToken {
         _DOMAIN_SEPARATOR = _buildDomainSeparator();
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // METADATA URI
-    // ─────────────────────────────────────────────────────────────────────
-
     function metaURI() external view override returns (string memory) { return _metaURI; }
 
     function setMetaURI(string calldata uri_) external override onlyOwner {
@@ -205,21 +186,12 @@ contract TaxToken is ILaunchpadToken {
         emit MetaURIUpdated(uri_);
     }
 
-    /**
-     * @notice Called by the factory after DEX liquidity has been seeded.
-     *         Router and pair are already set from initForLaunchpad; this simply
-     *         exits the bonding phase and enables normal tax/swap behaviour.
-     */
     function postMigrateSetup() external onlyFactoryOrCurve {
         if (!_inBondingPhase) revert DexAlreadyConfigured();
         _inBondingPhase = false;
         swapEnabled     = true;
         emit DexConfigured(pancakePair, address(pancakeRouter));
     }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // ERC-20
-    // ─────────────────────────────────────────────────────────────────────
 
     function name()        public view returns (string memory) { return _name;   }
     function symbol()      public view returns (string memory) { return _symbol; }
@@ -249,10 +221,6 @@ contract TaxToken is ILaunchpadToken {
         _transfer(from, to, amount);
         return true;
     }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // TRANSFER LOGIC
-    // ─────────────────────────────────────────────────────────────────────
 
     function _transfer(address from, address to, uint256 amount) private {
         if (from == address(0) || to == address(0)) revert ZeroAddress();
@@ -307,10 +275,6 @@ contract TaxToken is ILaunchpadToken {
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // SWAP & DISTRIBUTE (post-migration only)
-    // ─────────────────────────────────────────────────────────────────────
-
     function swapAndDistribute(uint256 tokenAmount) private lockSwap {
         uint256 lpBPS    = buyLiquidityTax + sellLiquidityTax;
         uint256 totalTax = buyMarketingTax + buyTeamTax + buyTreasuryTax + lpBPS
@@ -343,8 +307,7 @@ contract TaxToken is ILaunchpadToken {
         path[0] = address(this);
         path[1] = pancakeRouter.WETH();
         _approve(address(this), address(pancakeRouter), tokenAmount);
-        // amountOutMin = 0: no on-chain oracle is available at swap time.
-        // Sandwich risk is accepted; the token owner may call manualSwap() when conditions are favourable.
+        // amountOutMin = 0: no on-chain oracle available; owner may call manualSwap() when conditions suit.
         pancakeRouter.swapExactTokensForETHSupportingFeeOnTransferTokens(
             tokenAmount, 0, path, address(this), block.timestamp
         );
@@ -352,8 +315,8 @@ contract TaxToken is ILaunchpadToken {
 
     function _addLiquidity(uint256 tokenAmount, uint256 bnbAmount) private {
         _approve(address(this), address(pancakeRouter), tokenAmount);
-        // Minimums = 0: no oracle available.  LP is sent to burn address so any
-        // temporary under-valuation is irreversible but does not benefit an attacker.
+        // Minimums = 0: LP goes to the burn address, so any under-valuation is irreversible
+        // and does not benefit an attacker.
         pancakeRouter.addLiquidityETH{value: bnbAmount}(
             address(this), tokenAmount, 0, 0, BURN_ADDRESS, block.timestamp
         );
@@ -371,11 +334,7 @@ contract TaxToken is ILaunchpadToken {
         emit Approval(owner_, spender, amount);
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // EIP-2612 PERMIT
-    // ─────────────────────────────────────────────────────────────────────
-
-    /// @notice EIP-712 domain separator.  Recomputed on chain forks.
+    // Recomputed on chain forks.
     function DOMAIN_SEPARATOR() public view returns (bytes32) {
         if (block.chainid == _cachedChainId) return _DOMAIN_SEPARATOR;
         return _buildDomainSeparator();
@@ -391,7 +350,6 @@ contract TaxToken is ILaunchpadToken {
         ));
     }
 
-    /// @notice EIP-2612 permit — approve by signature, enabling approve + trade in one tx.
     function permit(
         address owner_,
         address spender,
@@ -412,10 +370,6 @@ contract TaxToken is ILaunchpadToken {
         if (signer == address(0) || signer != owner_) revert InvalidSignature();
         _approve(owner_, spender, value);
     }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // OWNER ADMIN
-    // ─────────────────────────────────────────────────────────────────────
 
     function setBuyTaxes(uint256 mkt, uint256 team, uint256 tsy, uint256 burn, uint256 lp) external onlyOwner {
         if (mkt + team + tsy + burn + lp > MAX_TOTAL_TAX) revert TaxExceedsMax();
@@ -473,10 +427,6 @@ contract TaxToken is ILaunchpadToken {
         bool ok = IERC20Rescue(tokenAddr).transfer(to, bal);
         if (!ok) revert TokenRescueFailed();
     }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // VIEWS
-    // ─────────────────────────────────────────────────────────────────────
 
     function getTotalBuyTax()  public view returns (uint256) {
         return buyMarketingTax + buyTeamTax + buyTreasuryTax + buyBurnTax + buyLiquidityTax;

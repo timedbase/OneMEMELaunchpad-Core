@@ -38,14 +38,12 @@ contract StandardToken is ILaunchpadToken {
     mapping(address => uint256)                     private _balances;
     mapping(address => mapping(address => uint256)) private _allowances;
 
-    // ─── EIP-2612 Permit ──────────────────────────────────────────────────
     bytes32 private constant PERMIT_TYPEHASH =
         keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)");
     mapping(address => uint256) public nonces;
     bytes32 private _DOMAIN_SEPARATOR;
     uint256 private _cachedChainId;
 
-    // ─── Token metadata URI ───────────────────────────────────────────────
     string private _metaURI;
 
     event Transfer(address indexed from, address indexed to, uint256 value);
@@ -53,36 +51,32 @@ contract StandardToken is ILaunchpadToken {
     event OwnershipTransferred(address indexed prev, address indexed next);
     event MetaURIUpdated(string uri);
 
-    address public bondingCurve;
+    address public migrator;
 
     modifier onlyFactory()        { if (msg.sender != factory)      revert NotFactory(); _; }
-    modifier onlyFactoryOrCurve() { if (msg.sender != factory && msg.sender != bondingCurve) revert NotFactory(); _; }
+    modifier onlyFactoryOrCurve() { if (msg.sender != factory && msg.sender != migrator) revert NotFactory(); _; }
     modifier onlyOwner()          { if (msg.sender != _owner)       revert NotOwner();   _; }
 
-    /// @dev Prevents direct initialization of the implementation contract.
+    // Prevents direct initialization of the implementation contract.
     constructor() { _initialized = true; }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // INIT
-    // ─────────────────────────────────────────────────────────────────────
 
     function initForLaunchpad(
         string  calldata name_,
         string  calldata symbol_,
         uint256          totalSupply_,
         address          factory_,
-        address          bondingCurve_,
+        address          migrator_,
         address          tokenOwner_,
         string  calldata metaURI_
     ) external {
         if (_initialized)               revert AlreadyInitialized();
         if (factory_      == address(0)) revert ZeroAddress();
-        if (bondingCurve_ == address(0)) revert ZeroAddress();
+        if (migrator_ == address(0)) revert ZeroAddress();
         if (tokenOwner_   == address(0)) revert ZeroAddress();
         _initialized = true;
 
         factory      = factory_;
-        bondingCurve = bondingCurve_;
+        migrator = migrator_;
         _owner       = tokenOwner_;
         _name        = name_;
         _symbol      = symbol_;
@@ -97,10 +91,6 @@ contract StandardToken is ILaunchpadToken {
         _DOMAIN_SEPARATOR = _buildDomainSeparator();
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // METADATA URI
-    // ─────────────────────────────────────────────────────────────────────
-
     function metaURI() external view override returns (string memory) { return _metaURI; }
 
     function setMetaURI(string calldata uri_) external override onlyOwner {
@@ -108,12 +98,8 @@ contract StandardToken is ILaunchpadToken {
         emit MetaURIUpdated(uri_);
     }
 
-    /// @notice No-op on StandardToken — no taxes to enable.  Satisfies ILaunchpadToken.
+    // No-op on StandardToken — satisfies ILaunchpadToken interface.
     function postMigrateSetup() external override onlyFactoryOrCurve {}
-
-    // ─────────────────────────────────────────────────────────────────────
-    // OWNERSHIP
-    // ─────────────────────────────────────────────────────────────────────
 
     function owner() external view returns (address) { return _owner; }
 
@@ -127,10 +113,6 @@ contract StandardToken is ILaunchpadToken {
         emit OwnershipTransferred(_owner, address(0));
         _owner = address(0);
     }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // ERC-20
-    // ─────────────────────────────────────────────────────────────────────
 
     function name()        external view returns (string memory) { return _name;   }
     function symbol()      external view returns (string memory) { return _symbol; }
@@ -163,10 +145,6 @@ contract StandardToken is ILaunchpadToken {
         return true;
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // INTERNAL
-    // ─────────────────────────────────────────────────────────────────────
-
     function _transfer(address from, address to, uint256 amount) private {
         if (from == address(0) || to == address(0)) revert ZeroAddress();
         if (_balances[from] < amount) revert InsufficientBalance();
@@ -183,11 +161,7 @@ contract StandardToken is ILaunchpadToken {
         emit Approval(owner_, spender, amount);
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // EIP-2612 PERMIT
-    // ─────────────────────────────────────────────────────────────────────
-
-    /// @notice EIP-712 domain separator.  Recomputed on chain forks.
+    // Recomputed on chain forks.
     function DOMAIN_SEPARATOR() public view returns (bytes32) {
         if (block.chainid == _cachedChainId) return _DOMAIN_SEPARATOR;
         return _buildDomainSeparator();
@@ -203,7 +177,6 @@ contract StandardToken is ILaunchpadToken {
         ));
     }
 
-    /// @notice EIP-2612 permit — approve by signature, enabling approve + trade in one tx.
     function permit(
         address owner_,
         address spender,
@@ -225,10 +198,6 @@ contract StandardToken is ILaunchpadToken {
         _approve(owner_, spender, value);
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // RESCUE
-    // ─────────────────────────────────────────────────────────────────────
-
     function rescueBNB(address to) external onlyOwner {
         if (to == address(0)) revert ZeroAddress();
         uint256 bal = address(this).balance;
@@ -239,9 +208,7 @@ contract StandardToken is ILaunchpadToken {
 
     receive() external payable {}
 
-    /// @notice Recover ERC-20 tokens accidentally sent to this contract.
-    ///         Cannot be used to pull the token's own supply out of the contract
-    ///         (that would allow the owner to drain vesting balances).
+    // Cannot rescue the contract's own token (would allow draining vesting balances).
     function rescueTokens(address tokenAddr, address to) external onlyOwner {
         if (tokenAddr == address(0) || to == address(0)) revert ZeroAddress();
         if (tokenAddr == address(this)) revert CannotRescueOwnToken();

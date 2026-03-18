@@ -36,7 +36,7 @@ The system is split into three contracts with distinct responsibilities:
 
 | Contract | Responsibilities |
 |----------|-----------------|
-| **LaunchpadFactory** | Token clone deployment (CREATE2), creation fee collection, default bonding-curve parameters, ownership + manager roles, timelocked configuration of BondingCurve, buy/sell/migrate convenience pass-throughs. `bondingCurve` address is immutable — set once at deployment. |
+| **LaunchpadFactory** | Token clone deployment (CREATE2), creation fee collection, default bonding-curve parameters, ownership + manager roles, timelocked configuration of BondingCurve, buy/sell/migrate convenience pass-throughs. `migrator` address is immutable — set once at deployment. |
 | **BondingCurve** | All per-token AMM state (`TokenConfig`), buy/sell/migrate execution, trade fee collection and dispatch, DEX migration. The `deployer` (immutable, set at construction) is the only address that can call `setFactory()` — all other admin is `onlyFactory`. |
 | **VestingWallet** | Single shared vesting escrow for all tokens launched through the factory. Receives creator allocations at token creation. Beneficiaries claim linearly over 12 months. Owner may void any schedule, burning remaining tokens immediately. |
 
@@ -52,9 +52,11 @@ Users may trade directly with BondingCurve or through the factory pass-throughs.
 createToken / createTT / createRFL
         │  (msg.value = creation fee + optional early buy)
         ▼
-  CREATE2 clone → initForLaunchpad(factory_ = address(launchpadFactory))
+  CREATE2 clone → initForLaunchpad(factory_ = address(launchpadFactory),
+                                   migrator_ = address(bondingCurve))
   • 100 % of supply minted to LaunchpadFactory
   • Factory distributes: liq + BC tokens → BondingCurve, creator tokens → VestingWallet
+  • Token stores migrator address (BondingCurve) — excluded from fees, permitted to call postMigrateSetup()
   • PancakeSwap pair created immediately (TAX/RFL tokens — empty, no liquidity yet)
   • _inBondingPhase = true  (taxes / reflection suppressed)
   • TaxToken / ReflectionToken: VestingWallet excluded from fee and reflection during init
@@ -70,7 +72,7 @@ createToken / createTT / createRFL
   Auto-migrate  (or call migrate() manually)
   • 38 % tokens + all raised BNB → PancakeSwap addLiquidityETH
   • LP tokens sent to dead wallet (permanently locked)
-  • postMigrateSetup() called on token — exits bonding phase, enables DEX trading
+  • migrator (BondingCurve) calls postMigrateSetup() on token — exits bonding phase, enables DEX trading
   • _inBondingPhase = false — normal DEX trading begins
 ```
 
@@ -366,7 +368,7 @@ constructor(
 
 ```
 constructor(
-    address bondingCurve_,           // step 4 address
+    address migrator_,               // step 4 address
     uint256 creationFee_,            // BNB wei (may be 0)
     uint256 defaultVirtualBNB_,      // BNB wei
     uint256 defaultMigrationTarget_, // BNB wei
@@ -498,7 +500,7 @@ Testnet BNB faucet: `https://testnet.bnbchain.org/faucet-smart`
 | Function | Returns |
 |----------|---------|
 | `predictTokenAddress(creator, salt, impl)` | Off-chain vanity salt mining helper |
-| `bondingCurve()` | Immutable BondingCurve address |
+| `migrator()` | Immutable BondingCurve address |
 | `vestingWallet()` | VestingWallet address |
 | `timelockExpiry(bytes32)` | Unix timestamp when a queued action unlocks |
 

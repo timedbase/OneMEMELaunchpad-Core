@@ -4,63 +4,33 @@ pragma solidity ^0.8.32;
 import "./interfaces/ILaunchpadToken.sol";
 import "./interfaces/IPancakeRouter02.sol";
 
-/**
- * @title BondingCurve — OneMEME
- * @notice Holds all bonding-curve state and executes buy / sell / migrate for every token
- *         launched through the LaunchpadFactory.
- *
- *         Tokens are minted directly to this contract at launch time (their `factory`
- *         field is set to address(this)), so this contract can call setupVesting() and
- *         postMigrateSetup() on the token contracts.
- *
- * ─── Trading paths ─────────────────────────────────────────────────────────
- *   Direct (user → BondingCurve):
- *     buy(token, minOut, deadline)          — user pays BNB, receives tokens
- *     sell(token, amountIn, minBNB, dl)     — user approves BondingCurve, receives BNB
- *     migrate(token)                        — permissionless once target reached
- *
- *   Routed (user → LaunchpadFactory → BondingCurve):
- *     buyFor(token, recipient, minOut)      — factory checked deadline; factory-only
- *     completeSell(token, seller, ...)      — factory transferred tokens first; factory-only
- *     earlyBuy(token, recipient)            — antibot-exempt; factory-only (creation only)
- *
- * ─── Admin ─────────────────────────────────────────────────────────────────
- *   All state-mutating admin functions are onlyFactory — the LaunchpadFactory is the
- *   sole authority, and its owner uses timelocked pass-through calls.
- *   The factory address itself is updatable (setFactory) to support factory upgrades.
- */
 contract BondingCurve {
-
-    // ─────────────────────────────────────────────────────────────────────
-    // TYPES
-    // ─────────────────────────────────────────────────────────────────────
 
     struct TokenConfig {
         address   token;
         address   creator;
 
         uint256 totalSupply;
-        uint256 liquidityTokens;   // 38 % — added to DEX at migration
-        uint256 creatorTokens;     // 5 % or 0 — linearly vested
-        uint256 bcTokensTotal;     // remainder — tradeable on the bonding curve
+        uint256 liquidityTokens;
+        uint256 creatorTokens;
+        uint256 bcTokensTotal;
         uint256 bcTokensSold;
 
-        uint256 virtualBNB;        // virtual BNB seeded at launch
-        uint256 k;                 // constant-product invariant: virtualBNB × bcTokensTotal
-        uint256 raisedBNB;         // real BNB raised so far
-        uint256 migrationTarget;   // real BNB target that triggers DEX migration
+        uint256 virtualBNB;
+        uint256 k;
+        uint256 raisedBNB;
+        uint256 migrationTarget;
 
-        address pair;              // PancakeSwap pair — created at launch for TAX/RFL
-        address router;            // router snapshotted at registration; used for migration
+        address pair;
+        address router;
 
         bool    antibotEnabled;
         uint256 creationBlock;
-        uint256 tradingBlock;      // creationBlock + antibotBlocks
+        uint256 tradingBlock;
 
         bool migrated;
     }
 
-    /// @dev Passed by the factory to registerToken().
     struct RegisterParams {
         uint256   liqTokens;
         uint256   creatorTokens;
@@ -73,17 +43,12 @@ contract BondingCurve {
         uint256   migrationTarget;
     }
 
-    /// @dev Packed outputs from _calcBuy — one memory pointer keeps each frame stack-safe.
     struct BuyResult {
         uint256 refund;
         uint256 fee;
         uint256 tokensOut;
-        uint256 netBNBIn;  // bnbIn − refund; actual BNB consumed, used in the TokenBought emit
+        uint256 netBNBIn;
     }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // CONSTANTS
-    // ─────────────────────────────────────────────────────────────────────
 
     uint256 private constant BPS_DENOM          = 10_000;
     uint256 private constant MAX_TOTAL_FEE      =    250; // 2.5 %
@@ -94,31 +59,23 @@ contract BondingCurve {
     uint256 private constant _NOT_ENTERED = 1;
     uint256 private constant _ENTERED     = 2;
 
-    // ─────────────────────────────────────────────────────────────────────
-    // STATE
-    // ─────────────────────────────────────────────────────────────────────
-
     address public factory;
     address public immutable deployer; // one-time right to call setFactory; no other privileges
     address public pancakeRouter;
 
-    uint256 public platformFee;   // bps — goes to feeRecipient
-    uint256 public charityFee;    // bps — goes to charityWallet
+    uint256 public platformFee;
+    uint256 public charityFee;
     address public feeRecipient;
     address public charityWallet; // address(0) → charity portion redirected to feeRecipient
 
-    // internal: the auto-generated public getter for a 17-field struct exceeds the
-    // EVM's 16-slot stack limit without viaIR. Use getToken() instead.
+    // The auto-generated public getter for a 17-field struct exceeds the EVM's 16-slot
+    // stack limit without viaIR. Use getToken() instead.
     mapping(address => TokenConfig) internal tokens;
     address[] public allTokens;
     mapping(address => address[]) private _tokensByCreator;
 
-    uint256 private _totalRaisedBNB;  // sum of all active tc.raisedBNB; used by rescueBNB
+    uint256 private _totalRaisedBNB;  // sum of all active raisedBNB pools; used by rescueBNB
     uint256 private _status;
-
-    // ─────────────────────────────────────────────────────────────────────
-    // ERRORS
-    // ─────────────────────────────────────────────────────────────────────
 
     error NotFactory();
     error Unauthorized();
@@ -138,10 +95,6 @@ contract BondingCurve {
     error RefundFailed();
     error AntibotBlocksOutOfRange();
     error DeadlineExpired();
-
-    // ─────────────────────────────────────────────────────────────────────
-    // EVENTS
-    // ─────────────────────────────────────────────────────────────────────
 
     event TokenRegistered(
         address indexed token,
@@ -177,10 +130,6 @@ contract BondingCurve {
     event CharityWalletUpdated(address wallet);
     event FactoryUpdated(address indexed oldFactory, address indexed newFactory);
 
-    // ─────────────────────────────────────────────────────────────────────
-    // MODIFIERS
-    // ─────────────────────────────────────────────────────────────────────
-
     modifier onlyFactory() {
         if (msg.sender != factory) revert NotFactory();
         _;
@@ -192,10 +141,6 @@ contract BondingCurve {
         _;
         _status = _NOT_ENTERED;
     }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // CONSTRUCTOR
-    // ─────────────────────────────────────────────────────────────────────
 
     constructor(
         address router_,
@@ -215,15 +160,6 @@ contract BondingCurve {
         _status      = _NOT_ENTERED;
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // REGISTRATION
-    // ─────────────────────────────────────────────────────────────────────
-
-    /**
-     * @notice Register a newly cloned token with the bonding curve.
-     *         Called by the factory after initForLaunchpad and after the factory
-     *         has transferred (liqTokens + bcTokens) to this contract.
-     */
     function registerToken(address token_, RegisterParams calldata p) external onlyFactory {
         if (token_ == address(0)) revert ZeroAddress();
 
@@ -247,7 +183,7 @@ contract BondingCurve {
         tc.raisedBNB       = 0;
         tc.migrationTarget = p.migrationTarget;
         tc.pair            = p.pair;
-        tc.router          = pancakeRouter; // snapshot at registration — immune to future changes
+        tc.router          = pancakeRouter; // snapshotted at registration; immune to future setRouter calls
         tc.antibotEnabled  = p.enableAntibot;
         tc.creationBlock   = block.number;
         tc.tradingBlock    = block.number + antibotBlocks;
@@ -259,24 +195,12 @@ contract BondingCurve {
         emit TokenRegistered(token_, p.creator, tc.totalSupply, p.virtualBNB, p.migrationTarget);
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // BUY — direct
-    // ─────────────────────────────────────────────────────────────────────
-
     function buy(address token_, uint256 minOut, uint256 deadline) external payable nonReentrant {
         if (block.timestamp > deadline) revert DeadlineExpired();
         if (msg.value == 0) revert ZeroAmount();
         _executeBuy(token_, msg.sender, msg.value, minOut, false);
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // BUY — factory-routed
-    // ─────────────────────────────────────────────────────────────────────
-
-    /**
-     * @notice Factory-proxied buy.  The factory validates deadline before calling.
-     *         Sends tokens to `recipient` (the original msg.sender on the factory).
-     */
     function buyFor(address token_, address recipient, uint256 minOut)
         external payable nonReentrant onlyFactory
     {
@@ -284,10 +208,7 @@ contract BondingCurve {
         _executeBuy(token_, recipient, msg.value, minOut, false);
     }
 
-    /**
-     * @notice Antibot-exempt early buy — called only by the factory during token creation.
-     *         Passes skipAntibot = true and minOut = 0.
-     */
+    // skipAntibot = true and minOut = 0; called only by the factory during token creation.
     function earlyBuy(address token_, address recipient)
         external payable nonReentrant onlyFactory
     {
@@ -295,15 +216,6 @@ contract BondingCurve {
         _executeBuy(token_, recipient, msg.value, 0, true);
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // SELL — direct
-    // ─────────────────────────────────────────────────────────────────────
-
-    /**
-     * @notice Sell tokens back to the bonding curve for BNB.
-     *         Caller must have approved this contract for `amountIn` tokens.
-     *         Peak stack: 9 slots (token_/amountIn/minBNBOut/deadline/tc/fee/netBNB/raisedAfter/ok).
-     */
     function sell(address token_, uint256 amountIn, uint256 minBNBOut, uint256 deadline)
         external nonReentrant
     {
@@ -313,9 +225,8 @@ contract BondingCurve {
         TokenConfig storage tc = tokens[token_];
         if (tc.token == address(0)) revert UnknownToken();
         if (tc.migrated)            revert AlreadyMigrated();
-        // Liquidity-reserve guard: only tokens that were previously bought can be sold back.
-        // liquidityTokens are held by this contract but are never part of the BC pool,
-        // so bcTokensSold can never include them — they are always reserved for migration.
+        // Only tokens previously bought can be sold back; liquidityTokens are never
+        // part of the BC pool and are always reserved for migration.
         if (amountIn > tc.bcTokensSold) revert ExceedsSoldSupply();
         (uint256 fee, uint256 netBNB) = _computeSell(tc, amountIn, minBNBOut);
         uint256 raisedAfter = tc.raisedBNB;
@@ -325,16 +236,7 @@ contract BondingCurve {
         emit TokenSold(token_, msg.sender, amountIn, netBNB, raisedAfter);
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // SELL — factory-routed
-    // ─────────────────────────────────────────────────────────────────────
-
-    /**
-     * @notice Complete a sell initiated by the factory.
-     *         The factory must have already transferred `amountIn` tokens to this contract
-     *         via transferFrom(seller → address(this)) before calling.
-     *         Peak stack: 10 slots (token_/seller/amountIn/minBNBOut/deadline/tc/fee/netBNB/raisedAfter/ok).
-     */
+    // Factory must transferFrom(seller → address(this)) before calling.
     function completeSell(
         address token_,
         address seller,
@@ -347,7 +249,6 @@ contract BondingCurve {
         TokenConfig storage tc = tokens[token_];
         if (tc.token == address(0)) revert UnknownToken();
         if (tc.migrated)            revert AlreadyMigrated();
-        // Liquidity-reserve guard: mirrors sell() — only previously-bought tokens accepted.
         if (amountIn > tc.bcTokensSold) revert ExceedsSoldSupply();
         (uint256 fee, uint256 netBNB) = _computeSell(tc, amountIn, minBNBOut);
         uint256 raisedAfter = tc.raisedBNB;
@@ -357,11 +258,6 @@ contract BondingCurve {
         emit TokenSold(token_, seller, amountIn, netBNB, raisedAfter);
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // MIGRATE
-    // ─────────────────────────────────────────────────────────────────────
-
-    /// @notice Permissionless once raisedBNB ≥ migrationTarget.
     function migrate(address token_) external nonReentrant {
         TokenConfig storage tc = tokens[token_];
         if (tc.token == address(0))            revert UnknownToken();
@@ -369,10 +265,6 @@ contract BondingCurve {
         if (tc.raisedBNB < tc.migrationTarget) revert MigrationTargetNotReached();
         _doMigrate(tc, token_);
     }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // ADMIN — onlyFactory
-    // ─────────────────────────────────────────────────────────────────────
 
     function setRouter(address router_) external onlyFactory {
         if (router_ == address(0)) revert ZeroAddress();
@@ -398,8 +290,6 @@ contract BondingCurve {
         emit CharityWalletUpdated(wallet_);
     }
 
-    /// @notice Update the factory address. Callable only by the deployer.
-    ///         The deployer's sole privilege — they cannot call any other admin function directly.
     function setFactory(address factory_) external {
         if (msg.sender != deployer) revert Unauthorized();
         if (factory_ == address(0)) revert ZeroAddress();
@@ -407,23 +297,12 @@ contract BondingCurve {
         factory = factory_;
     }
 
-    /// @notice Sweep stray BNB (anything above the sum of all active raisedBNB pools).
     function rescueBNB(address to) external onlyFactory {
         if (to == address(0)) revert ZeroAddress();
         if (address(this).balance <= _totalRaisedBNB) revert ZeroAmount();
         _safeSendBNB(to, address(this).balance - _totalRaisedBNB);
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // INTERNAL — BUY
-    // ─────────────────────────────────────────────────────────────────────
-
-    /**
-     * @dev Entry point shared by buy(), buyFor(), and earlyBuy().
-     *      Split into _calcBuy + _finalizeBuy so each frame stays well under
-     *      the EVM's 16-slot stack limit without requiring viaIR.
-     *      Peak stack here: 7 slots (5 params + tc + r).
-     */
     function _executeBuy(
         address token_,
         address buyer,
@@ -439,10 +318,6 @@ contract BondingCurve {
         _finalizeBuy(tc, token_, buyer, skipAntibot, r);
     }
 
-    /**
-     * @dev AMM math: computes fee, tokensOut, refund and updates tc state.
-     *      Peak stack: 9 slots (3 params + r + poolBNB + poolTokens + totalFee + grossNeeded + netBNB).
-     */
     function _calcBuy(
         TokenConfig storage tc,
         uint256 bnbIn,
@@ -451,8 +326,7 @@ contract BondingCurve {
         uint256 poolBNB    = tc.virtualBNB + tc.raisedBNB;
         uint256 poolTokens = tc.bcTokensTotal - tc.bcTokensSold;
         uint256 totalFee   = platformFee + charityFee;
-        // grossNeeded = gross BNB required to hit the migration target exactly.
-        // Ceiling division ensures net amount covers the target after fee deduction.
+        // Ceiling division ensures net amount covers the migration target after fee deduction.
         uint256 grossNeeded = totalFee == 0
             ? tc.migrationTarget - tc.raisedBNB
             : ((tc.migrationTarget - tc.raisedBNB) * BPS_DENOM
@@ -461,7 +335,7 @@ contract BondingCurve {
         uint256 netBNB;
 
         if (bnbIn >= grossNeeded) {
-            // Migration-cap: sell ALL remaining BC tokens, refund excess BNB.
+            // Migration-cap: sell all remaining BC tokens and refund excess BNB.
             r.refund    = bnbIn - grossNeeded;
             r.fee       = (grossNeeded * totalFee) / BPS_DENOM;
             netBNB      = grossNeeded - r.fee;
@@ -478,7 +352,6 @@ contract BondingCurve {
 
         if (r.tokensOut == 0)         revert ZeroAmount();
         if (r.tokensOut < minOut)     revert SlippageTooFewTokens();
-        // Hard guard: tokensOut must never exceed the BC pool — liquidity tokens are not for sale.
         if (r.tokensOut > poolTokens) revert LiquidityReserveViolation();
 
         tc.raisedBNB    += netBNB;
@@ -486,10 +359,6 @@ contract BondingCurve {
         tc.bcTokensSold += r.tokensOut;
     }
 
-    /**
-     * @dev Settlement: antibot burn, token transfers, BNB refund, emit, auto-migrate.
-     *      Peak stack: 9 slots (5 params + tokensToDead + remaining + totalBlocks + penaltyBPS).
-     */
     function _finalizeBuy(
         TokenConfig storage tc,
         address token_,
@@ -502,8 +371,7 @@ contract BondingCurve {
             if (!skipAntibot && tc.antibotEnabled && block.number < tc.tradingBlock) {
                 uint256 remaining   = tc.tradingBlock - block.number;
                 uint256 totalBlocks = tc.tradingBlock - tc.creationBlock;
-                // Ceiling: penalty decreases slightly slower, preventing bots from
-                // exploiting floor rounding at the boundary block.
+                // Ceiling keeps the penalty from rounding down at the boundary block.
                 uint256 penaltyBPS  = (remaining * BPS_DENOM + totalBlocks - 1) / totalBlocks;
                 if (penaltyBPS > BPS_DENOM) penaltyBPS = BPS_DENOM;
                 tokensToDead = (r.tokensOut * penaltyBPS) / BPS_DENOM;
@@ -520,26 +388,18 @@ contract BondingCurve {
 
         emit TokenBought(token_, buyer, r.netBNBIn, r.tokensOut, tokensToDead, tc.raisedBNB);
 
-        // Auto-migrate as soon as the target is met — no separate call required.
         if (!tc.migrated && tc.raisedBNB >= tc.migrationTarget) {
             _doMigrate(tc, token_);
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // INTERNAL — MIGRATE
-    // ─────────────────────────────────────────────────────────────────────
-
-    /// @dev Seed DEX liquidity, burn unsold BC tokens, and call postMigrateSetup on the token.
     function _doMigrate(TokenConfig storage tc, address token_) internal {
         tc.migrated = true;
 
         uint256 migrationBNB = tc.raisedBNB;
         uint256 liqTokens    = tc.liquidityTokens;
 
-        // Invariant: this contract must hold at least liqTokens at migration.
-        // bcTokensSold accounting guarantees this (only bought tokens can be sold back,
-        // and liquidityTokens are never part of the BC pool), but we assert explicitly.
+        // bcTokensSold accounting ensures this holds, but assert explicitly as a safety net.
         if (ILaunchpadToken(token_).balanceOf(address(this)) < liqTokens)
             revert LiquidityReserveViolation();
 
@@ -548,7 +408,7 @@ contract BondingCurve {
 
         address pair_ = tc.pair;
 
-        {   // Scope: router_ freed after addLiquidityETH; minimums inlined to save slots.
+        {
             address router_ = tc.router;
             ILaunchpadToken(token_).approve(router_, liqTokens);
             // LP tokens sent to dead wallet — permanently locked.
@@ -561,11 +421,9 @@ contract BondingCurve {
             );
         }
 
-        // Exit bonding phase on all token types (no-op on StandardToken).
         ILaunchpadToken(token_).postMigrateSetup();
 
-        // Burn any unsold BC tokens — should be zero via migration-cap guarantee,
-        // but handles edge cases such as a direct migrate() call.
+        // Should be zero after the migration-cap buy, but handles a direct migrate() call.
         uint256 unsold = tc.bcTokensTotal - tc.bcTokensSold;
         if (unsold > 0) ILaunchpadToken(token_).transfer(DEAD, unsold);
 
@@ -573,16 +431,6 @@ contract BondingCurve {
         emit TokenMigrated(token_, pair_, migrationBNB, liqTokens);
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // INTERNAL — SELL
-    // ─────────────────────────────────────────────────────────────────────
-
-    /**
-     * @dev AMM sell math + state update, shared by sell() and completeSell().
-     *      Two call sites prevent optimizer inlining; peak stack: 9 slots
-     *      (tc/amountIn/minBNBOut + fee/netBNB returns + poolBNB/newPoolToks/newPoolBNB/grossBNB).
-     *      totalFee reuses a slot after grossBNB is consumed.
-     */
     function _computeSell(
         TokenConfig storage tc,
         uint256 amountIn,
@@ -603,17 +451,13 @@ contract BondingCurve {
         tc.bcTokensSold -= amountIn;
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // INTERNAL — FEE DISPATCH
-    // ─────────────────────────────────────────────────────────────────────
-
     function _dispatchFee(uint256 amount) private {
         if (amount == 0) return;
         uint256 cFee    = charityFee;
         uint256 total   = cFee + platformFee;
         address charity = charityWallet;
         if (charity != address(0) && cFee > 0 && total > 0) {
-            uint256 charityAmt = (amount * cFee + total - 1) / total; // ceiling — charity exact share
+            uint256 charityAmt = (amount * cFee + total - 1) / total; // ceiling for exact charity share
             _safeSendBNB(charity,      charityAmt);
             _safeSendBNB(feeRecipient, amount - charityAmt);
         } else {
@@ -627,14 +471,6 @@ contract BondingCurve {
         if (!ok) revert BNBTransferFailed();
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // VIEW FUNCTIONS
-    // ─────────────────────────────────────────────────────────────────────
-
-    /**
-     * @notice Tokens received for a given BNB input (after trade fee).
-     *         Accounts for the migration cap.
-     */
     function getAmountOut(address token_, uint256 bnbIn)
         external view
         returns (uint256 tokensOut, uint256 feeBNB)
@@ -660,7 +496,6 @@ contract BondingCurve {
         }
     }
 
-    /// @notice BNB received for selling a given token amount (after trade fee).
     function getAmountOutSell(address token_, uint256 tokensIn)
         external view
         returns (uint256 bnbOut, uint256 feeBNB)
@@ -678,7 +513,6 @@ contract BondingCurve {
         bnbOut = grossBNB - feeBNB;
     }
 
-    /// @notice Spot price: BNB per whole token (×1e18).
     function getSpotPrice(address token_) external view returns (uint256 price) {
         TokenConfig storage tc = tokens[token_];
         if (tc.token == address(0)) revert UnknownToken();
@@ -688,9 +522,6 @@ contract BondingCurve {
         price = (poolBNB * 1e18) / poolTokens;
     }
 
-    /// @notice Returns the full TokenConfig for a registered token as a memory struct.
-    ///         (The mapping is internal; this replaces the auto-generated public getter
-    ///          which would overflow the stack without viaIR due to the 17-field struct.)
     function getToken(address token_) external view returns (TokenConfig memory) {
         return tokens[token_];
     }
