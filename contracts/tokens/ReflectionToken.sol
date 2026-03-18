@@ -39,28 +39,6 @@ interface IPancakeFactoryRFL {
     function getPair(address tokenA, address tokenB)   external view returns (address);
 }
 
-/**
- * @title ReflectionToken  (OneMEME Launchpad)
- * @notice ERC-20 with RFI-style passive reflection and optional custom reflection
- *         token.  Deployed as a minimal-proxy clone by LaunchpadFactory.
- *
- * Lifecycle:
- *   1. initForLaunchpad() — mints entire supply to factory (excluded from
- *      reflection), bonding-curve phase active.  All taxes start at 0 %;
- *      the token owner must call setBuyTaxes / setSellTaxes to enable them.
- *   2. Factory transfers tokens to buyers; no fees during BC phase.
- *   3. postMigrateSetup(pair, router) — pair set, bonding phase off, full
- *      reflection & tax logic begins.
- *
- * Reflection distribution:
- *   - Native mode  (reflectionToken == address(0)): RFI-style, every non-excluded
- *     holder's balance passively increases as _rTotal is reduced.
- *   - Custom mode  (reflectionToken != address(0)): reflection tax is accumulated
- *     and swapped to the set token, then pushed proportionally to all holders
- *     whose balance meets the minimum threshold (default 0.02 % of total supply;
- *     owner may raise this but never lower it below 0.02 %).
- *
- */
 contract ReflectionToken is ILaunchpadToken {
 
     error NotOwner();

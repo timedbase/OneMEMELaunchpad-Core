@@ -36,19 +36,6 @@ interface IERC20Rescue {
     function transfer(address to, uint256 amount) external returns (bool);
 }
 
-/**
- * @title TaxToken  (OneMEME Launchpad)
- * @notice ERC-20 with configurable buy/sell taxes.
- *         Deployed as a minimal-proxy clone by LaunchpadFactory.
- *
- * Lifecycle:
- *   1. Factory calls initForLaunchpad() – mints entire supply to factory,
- *      tax params configured, bonding-curve phase active.
- *   2. During bonding-curve phase transfers from/to the factory are fee-free;
- *      swapAndDistribute is suppressed (no DEX pair yet).
- *   3. Factory calls postMigrateSetup(pair, router) after DEX migration –
- *      pancakePair & router set, bonding phase disabled, normal fees begin.
- */
 contract TaxToken is ILaunchpadToken {
 
     // ─── errors ────────────────────────────────────────────────────────

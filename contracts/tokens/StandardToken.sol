@@ -12,13 +12,6 @@ interface ILaunchpadToken {
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
 }
 
-/**
- * @title StandardToken
- * @notice Plain ERC-20 used by OneMEME launchpad. Deployed as a minimal-proxy
- *         clone by LaunchpadFactory. All tokens are minted to the factory on
- *         init; the factory manages distribution during the bonding-curve phase.
- *         There are no transfer restrictions or taxes on this token type.
- */
 contract StandardToken is ILaunchpadToken {
 
     error NotOwner();
