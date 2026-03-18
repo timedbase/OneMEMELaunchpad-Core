@@ -225,16 +225,25 @@ contract LaunchpadFactory {
      * @param creationFee_            Token creation fee in BNB wei
      * @param defaultVirtualBNB_      Default virtual BNB seeded into bonding curve
      * @param defaultMigrationTarget_ Default BNB raise target before DEX migration
+     * @param standardImpl_           Deployed StandardToken implementation
+     * @param taxImpl_                Deployed TaxToken implementation
+     * @param reflectionImpl_         Deployed ReflectionToken implementation
      */
     constructor(
         address bondingCurve_,
         uint256 creationFee_,
         uint256 defaultVirtualBNB_,
-        uint256 defaultMigrationTarget_
+        uint256 defaultMigrationTarget_,
+        address standardImpl_,
+        address taxImpl_,
+        address reflectionImpl_
     ) {
         if (bondingCurve_           == address(0)) revert ZeroAddress();
         if (defaultVirtualBNB_      == 0)          revert ZeroAmount();
         if (defaultMigrationTarget_ == 0)          revert ZeroAmount();
+        if (standardImpl_           == address(0)) revert ZeroAddress();
+        if (taxImpl_                == address(0)) revert ZeroAddress();
+        if (reflectionImpl_         == address(0)) revert ZeroAddress();
 
         owner                  = msg.sender;
         bondingCurve           = BondingCurve(payable(bondingCurve_));
@@ -243,9 +252,9 @@ contract LaunchpadFactory {
         defaultMigrationTarget = defaultMigrationTarget_;
         _status                = _NOT_ENTERED;
 
-        standardImpl   = address(new StandardToken());
-        taxImpl        = address(new TaxToken());
-        reflectionImpl = address(new ReflectionToken());
+        standardImpl   = standardImpl_;
+        taxImpl        = taxImpl_;
+        reflectionImpl = reflectionImpl_;
     }
 
     // ─────────────────────────────────────────────────────────────────────

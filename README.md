@@ -324,36 +324,75 @@ RFI-style passive reflection plus optional custom reflection token distribution.
 
 ## Deployment
 
-### 1. Deploy BondingCurve
+Each contract is deployed independently. Six transactions total.
 
-```solidity
+### 1. Deploy StandardToken
+
+No constructor arguments. This is the implementation contract — it is never initialised directly, only cloned.
+
+### 2. Deploy TaxToken
+
+No constructor arguments.
+
+### 3. Deploy ReflectionToken
+
+No constructor arguments.
+
+### 4. Deploy BondingCurve
+
+```
 constructor(
-    address factory_,       // set to address(0) initially, or use a 2-step deploy
+    address factory_,       // use your deployer EOA as placeholder
     address router_,        // PancakeSwap V2 router
-    address feeRecipient_,  // receives platform and creation fees
-    uint256 platformFee_,   // BPS → feeRecipient
-    uint256 charityFee_     // BPS → charityWallet
+    address feeRecipient_,  // receives platform fees and creation fees
+    uint256 platformFee_,   // BPS → feeRecipient (e.g. 100 = 1 %)
+    uint256 charityFee_     // BPS → charityWallet (e.g. 0)
 )
 ```
 
 `platformFee_ + charityFee_` must not exceed 250 BPS (2.5 %).
 
-### 2. Deploy LaunchpadFactory
+### 5. Deploy LaunchpadFactory
 
-```solidity
+```
 constructor(
-    address bondingCurve_,           // deployed BondingCurve
-    uint256 creationFee_,             // BNB wei (may be 0)
-    uint256 defaultVirtualBNB_,       // BNB wei
-    uint256 defaultMigrationTarget_   // BNB wei
+    address bondingCurve_,           // step 4 address
+    uint256 creationFee_,            // BNB wei (may be 0)
+    uint256 defaultVirtualBNB_,      // BNB wei
+    uint256 defaultMigrationTarget_, // BNB wei
+    address standardImpl_,           // step 1 address
+    address taxImpl_,                // step 2 address
+    address reflectionImpl_          // step 3 address
 )
 ```
 
-The factory deploys the three implementation contracts (`StandardToken`, `TaxToken`, `ReflectionToken`) in its constructor.
+### 6. Point BondingCurve at the factory
 
-### 3. Update BondingCurve factory pointer
+```
+BondingCurve.setFactory(launchpadFactoryAddress)
+```
 
-Call `BondingCurve.setFactory(address(launchpadFactory))` — this must be done once before any tokens are launched.
+Called from the deployer EOA (which was used as `factory_` in step 4). After this call the deployer has no further authority over BondingCurve — only the factory can call its admin functions.
+
+---
+
+## Test Values (BSC Testnet)
+
+Router: `0xD99D1c33F9fC3444f8101754aBC46c52416550D1`
+
+| Parameter | Value |
+|-----------|-------|
+| `creationFee` | `1000000000000000` (0.001 BNB) |
+| `defaultVirtualBNB` | `1000000000000000000` (1 BNB) |
+| `defaultMigrationTarget` | `5000000000000000000` (5 BNB) |
+| `platformFee` | `100` (1 %) |
+| `charityFee` | `0` |
+
+With these values and a MILLION supply token (620,000 tokens on the BC):
+- Starting price ≈ 0.0000016 BNB/token
+- Hit migration by sending ~5 BNB total across buys — the crossing buy auto-migrates
+
+Testnet BNB faucet: `https://testnet.bnbchain.org/faucet-smart`
 
 ---
 
