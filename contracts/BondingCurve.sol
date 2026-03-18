@@ -99,6 +99,7 @@ contract BondingCurve {
     // ─────────────────────────────────────────────────────────────────────
 
     address public factory;
+    address public immutable deployer; // one-time right to call setFactory; no other privileges
     address public pancakeRouter;
 
     uint256 public platformFee;   // bps — goes to feeRecipient
@@ -120,6 +121,7 @@ contract BondingCurve {
     // ─────────────────────────────────────────────────────────────────────
 
     error NotFactory();
+    error Unauthorized();
     error Reentrancy();
     error ZeroAddress();
     error ZeroAmount();
@@ -196,18 +198,16 @@ contract BondingCurve {
     // ─────────────────────────────────────────────────────────────────────
 
     constructor(
-        address factory_,
         address router_,
         address feeRecipient_,
         uint256 platformFee_,
         uint256 charityFee_
     ) {
-        if (factory_      == address(0)) revert ZeroAddress();
         if (router_       == address(0)) revert ZeroAddress();
         if (feeRecipient_ == address(0)) revert ZeroAddress();
         if (platformFee_ + charityFee_ > MAX_TOTAL_FEE) revert FeeExceedsMax();
 
-        factory      = factory_;
+        deployer     = msg.sender;
         pancakeRouter = router_;
         feeRecipient = feeRecipient_;
         platformFee  = platformFee_;
@@ -398,8 +398,10 @@ contract BondingCurve {
         emit CharityWalletUpdated(wallet_);
     }
 
-    /// @notice Update the factory address — used when the LaunchpadFactory itself is upgraded.
-    function setFactory(address factory_) external onlyFactory {
+    /// @notice Update the factory address. Callable only by the deployer.
+    ///         The deployer's sole privilege — they cannot call any other admin function directly.
+    function setFactory(address factory_) external {
+        if (msg.sender != deployer) revert Unauthorized();
         if (factory_ == address(0)) revert ZeroAddress();
         emit FactoryUpdated(factory, factory_);
         factory = factory_;
