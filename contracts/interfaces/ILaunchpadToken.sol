@@ -4,12 +4,6 @@ pragma solidity ^0.8.32;
 /// @notice Minimal interface every launchpad token must implement so the factory
 ///         can manage the bonding-curve phase and trigger DEX migration.
 interface ILaunchpadToken {
-    /// @notice Called once by the factory (at token creation) to deposit the
-    ///         creator's allocation into the token contract and start the 12-month
-    ///         linear vesting schedule.  The factory must have already transferred
-    ///         `amount_` tokens to this contract before calling.
-    function setupVesting(address creator_, uint256 amount_) external;
-
     /// @notice Called by the BondingCurve at migration to exit the bonding phase
     ///         and enable normal DEX trading.  No-op on StandardToken; activates
     ///         taxes / reflection on TaxToken / ReflectionToken.

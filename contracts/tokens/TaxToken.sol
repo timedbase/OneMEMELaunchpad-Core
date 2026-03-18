@@ -1,7 +1,16 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.32;
 
-import "../interfaces/ILaunchpadToken.sol";
+interface ILaunchpadToken {
+    function postMigrateSetup() external;
+    function metaURI() external view returns (string memory);
+    function setMetaURI(string calldata uri_) external;
+    function totalSupply() external view returns (uint256);
+    function balanceOf(address account) external view returns (uint256);
+    function transfer(address to, uint256 amount) external returns (bool);
+    function approve(address spender, uint256 amount) external returns (bool);
+    function transferFrom(address from, address to, uint256 amount) external returns (bool);
+}
 
 interface IPancakeRouter02TT {
     function factory() external pure returns (address);
@@ -55,9 +64,6 @@ contract TaxToken is ILaunchpadToken {
     error InsufficientBalance();
     error NothingToSwap();
     error CannotRescueOwnToken();
-    error VestingAlreadySet();
-    error NoVesting();
-    error NothingToClaim();
     error BNBTransferFailed();
     error TokenRescueFailed();
     error PermitExpired();
@@ -115,16 +121,6 @@ contract TaxToken is ILaunchpadToken {
     bool private inSwap;
     bool public  swapEnabled;
 
-    address public vestingCreator;
-    uint256 public vestingTotal;
-    uint256 public vestingStart;
-    uint256 public vestingClaimed;
-    uint256 private constant VESTING_DURATION = 365 days;
-
-    // Tracks the vesting escrow portion held inside this contract.
-    // Excluded from swapAndDistribute so tax swaps never consume vested tokens.
-    uint256 private _vestingBalance;
-
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
     event OwnershipTransferred(address indexed prev, address indexed next);
@@ -134,8 +130,6 @@ contract TaxToken is ILaunchpadToken {
     event SwapAndLiquify(uint256 tokensSwapped, uint256 bnbReceived);
     event DexConfigured(address pair, address router);
     event MetaURIUpdated(string uri);
-    event VestingSetup(address indexed creator, uint256 amount);
-    event VestingClaimed(address indexed owner, uint256 amount);
 
     modifier lockSwap()   { inSwap = true; _; inSwap = false; }
     modifier onlyOwner()  { if (msg.sender != _owner)   revert NotOwner();   _; }
@@ -164,7 +158,8 @@ contract TaxToken is ILaunchpadToken {
         address            bondingCurve_,
         address            tokenOwner_,
         string    calldata metaURI_,
-        address            router_
+        address            router_,
+        address            vestingWallet_
     ) external {
         if (_initialized)               revert AlreadyInitialized();
         if (factory_      == address(0)) revert ZeroAddress();
@@ -194,6 +189,7 @@ contract TaxToken is ILaunchpadToken {
         _isExcludedFromFee[tokenOwner_]    = true;
         _isExcludedFromFee[address(this)]  = true;
         _isExcludedFromFee[BURN_ADDRESS]   = true;
+        if (vestingWallet_ != address(0)) _isExcludedFromFee[vestingWallet_] = true;
 
         _metaURI = metaURI_;
 
@@ -279,10 +275,8 @@ contract TaxToken is ILaunchpadToken {
         bool takeFee = !(_isExcludedFromFee[from] || _isExcludedFromFee[to]);
 
         if (!_inBondingPhase && swapEnabled && takeFee && !inSwap && from != pancakePair) {
-            uint256 taxBalance = _balances[address(this)] > _vestingBalance
-                ? _balances[address(this)] - _vestingBalance
-                : 0;
-            if (taxBalance > 0 && taxBalance >= swapThreshold) swapAndDistribute(taxBalance);
+            uint256 taxBalance = _balances[address(this)];
+            if (taxBalance >= swapThreshold) swapAndDistribute(taxBalance);
         }
 
         _executeTransfer(from, to, amount, takeFee);
@@ -474,9 +468,7 @@ contract TaxToken is ILaunchpadToken {
     }
 
     function manualSwap() external onlyOwner {
-        uint256 taxBalance = _balances[address(this)] > _vestingBalance
-            ? _balances[address(this)] - _vestingBalance
-            : 0;
+        uint256 taxBalance = _balances[address(this)];
         if (taxBalance == 0) revert NothingToSwap();
         swapAndDistribute(taxBalance);
     }
@@ -507,47 +499,6 @@ contract TaxToken is ILaunchpadToken {
     }
     function isExcludedFromFee(address a) public view returns (bool) { return _isExcludedFromFee[a]; }
     function inBondingPhase()             public view returns (bool) { return _inBondingPhase; }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // CREATOR VESTING  (self-custodied in this contract)
-    // ─────────────────────────────────────────────────────────────────────
-
-    function setupVesting(address creator_, uint256 amount_) external override onlyFactory {
-        if (vestingCreator != address(0)) revert VestingAlreadySet();
-        if (creator_ == address(0))       revert ZeroAddress();
-        if (amount_  == 0)                revert ZeroAmount();
-        vestingCreator   = creator_;
-        vestingTotal     = amount_;
-        vestingStart     = block.timestamp;
-        _vestingBalance  = amount_;
-        emit VestingSetup(creator_, amount_);
-    }
-
-    /**
-     * @notice Claim linearly vested tokens.  Callable only by the current token owner.
-     *         If ownership is transferred, the new owner inherits vesting rights.
-     *         vestingCreator records the original recipient for transparency only.
-     *         Transfer is fee-free (address(this) is excluded from fees).
-     */
-    function claimVesting() external {
-        if (msg.sender != _owner) revert NotOwner();
-        if (vestingTotal == 0)    revert NoVesting();
-        uint256 elapsed = block.timestamp - vestingStart;
-        if (elapsed > VESTING_DURATION) elapsed = VESTING_DURATION;
-        uint256 claimable = (vestingTotal * elapsed / VESTING_DURATION) - vestingClaimed;
-        if (claimable == 0) revert NothingToClaim();
-        vestingClaimed  += claimable;
-        _vestingBalance -= claimable;
-        _transfer(address(this), _owner, claimable);
-        emit VestingClaimed(_owner, claimable);
-    }
-
-    function claimableVesting() external view returns (uint256) {
-        if (vestingTotal == 0) return 0;
-        uint256 elapsed = block.timestamp - vestingStart;
-        if (elapsed > VESTING_DURATION) elapsed = VESTING_DURATION;
-        return (vestingTotal * elapsed / VESTING_DURATION) - vestingClaimed;
-    }
 
     receive() external payable {}
 }

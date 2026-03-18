@@ -1,7 +1,16 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.32;
 
-import "../interfaces/ILaunchpadToken.sol";
+interface ILaunchpadToken {
+    function postMigrateSetup() external;
+    function metaURI() external view returns (string memory);
+    function setMetaURI(string calldata uri_) external;
+    function totalSupply() external view returns (uint256);
+    function balanceOf(address account) external view returns (uint256);
+    function transfer(address to, uint256 amount) external returns (bool);
+    function approve(address spender, uint256 amount) external returns (bool);
+    function transferFrom(address from, address to, uint256 amount) external returns (bool);
+}
 
 /**
  * @title StandardToken
@@ -17,9 +26,6 @@ contract StandardToken is ILaunchpadToken {
     error AlreadyInitialized();
     error ZeroAddress();
     error ZeroAmount();
-    error VestingAlreadySet();
-    error NoVesting();
-    error NothingToClaim();
     error InsufficientBalance();
     error ExceedsAllowance();
     error BNBTransferFailed();
@@ -49,19 +55,10 @@ contract StandardToken is ILaunchpadToken {
     // ─── Token metadata URI ───────────────────────────────────────────────
     string private _metaURI;
 
-    // ─── Creator vesting (token contract is its own escrow) ───────────────
-    address public vestingCreator;
-    uint256 public vestingTotal;
-    uint256 public vestingStart;
-    uint256 public vestingClaimed;
-    uint256 private constant VESTING_DURATION = 365 days;
-
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
     event OwnershipTransferred(address indexed prev, address indexed next);
     event MetaURIUpdated(string uri);
-    event VestingSetup(address indexed creator, uint256 amount);
-    event VestingClaimed(address indexed owner, uint256 amount);
 
     address public bondingCurve;
 
@@ -120,40 +117,6 @@ contract StandardToken is ILaunchpadToken {
 
     /// @notice No-op on StandardToken — no taxes to enable.  Satisfies ILaunchpadToken.
     function postMigrateSetup() external override onlyFactoryOrCurve {}
-
-    function setupVesting(address creator_, uint256 amount_) external override onlyFactory {
-        if (vestingCreator != address(0)) revert VestingAlreadySet();
-        if (creator_ == address(0))       revert ZeroAddress();
-        if (amount_  == 0)                revert ZeroAmount();
-        vestingCreator = creator_;
-        vestingTotal   = amount_;
-        vestingStart   = block.timestamp;
-        emit VestingSetup(creator_, amount_);
-    }
-
-    /**
-     * @notice Claim linearly vested tokens.
-     *         If ownership is transferred, the new owner inherits vesting rights.
-     *         vestingCreator records the original recipient for transparency only.
-     */
-    function claimVesting() external {
-        if (msg.sender != _owner) revert NotOwner();
-        if (vestingTotal == 0)    revert NoVesting();
-        uint256 elapsed = block.timestamp - vestingStart;
-        if (elapsed > VESTING_DURATION) elapsed = VESTING_DURATION;
-        uint256 claimable = (vestingTotal * elapsed / VESTING_DURATION) - vestingClaimed;
-        if (claimable == 0) revert NothingToClaim();
-        vestingClaimed += claimable;
-        _transfer(address(this), _owner, claimable);
-        emit VestingClaimed(_owner, claimable);
-    }
-
-    function claimableVesting() external view returns (uint256) {
-        if (vestingTotal == 0) return 0;
-        uint256 elapsed = block.timestamp - vestingStart;
-        if (elapsed > VESTING_DURATION) elapsed = VESTING_DURATION;
-        return (vestingTotal * elapsed / VESTING_DURATION) - vestingClaimed;
-    }
 
     // ─────────────────────────────────────────────────────────────────────
     // OWNERSHIP

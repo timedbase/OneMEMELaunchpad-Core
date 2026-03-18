@@ -1,12 +1,34 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.32;
 
-import "./interfaces/ILaunchpadToken.sol";
 import "./interfaces/IPancakeRouter02.sol";
-import "./tokens/StandardToken.sol";
-import "./tokens/TaxToken.sol";
-import "./tokens/ReflectionToken.sol";
 import "./BondingCurve.sol";
+
+interface IERC20Min {
+    function transfer(address to, uint256 amount) external returns (bool);
+    function transferFrom(address from, address to, uint256 amount) external returns (bool);
+}
+
+interface IVestingWallet {
+    function addVesting(address token, address beneficiary, uint256 amount) external;
+}
+
+// Minimal init interfaces — token implementations are deployed independently.
+interface IStdInit {
+    function initForLaunchpad(
+        string memory name_, string memory symbol_, uint256 totalSupply_,
+        address factory_, address bc_, address creator_, string memory metaURI_
+    ) external;
+}
+
+interface ITaxRflInit {
+    function initForLaunchpad(
+        string memory name_, string memory symbol_, uint256 totalSupply_,
+        address factory_, address bc_, address creator_, string memory metaURI_,
+        address router_, address vestingWallet_
+    ) external;
+    function pancakePair() external view returns (address);
+}
 
 /**
  * @title LaunchpadFactory — OneMEME
@@ -128,6 +150,7 @@ contract LaunchpadFactory {
     address public immutable reflectionImpl;
 
     BondingCurve public immutable bondingCurve;
+    address public vestingWallet;
 
     uint256 public creationFee;            // BNB wei — collected at token creation
     uint256 public defaultVirtualBNB;      // BNB wei — passed to BondingCurve at registration
@@ -227,7 +250,8 @@ contract LaunchpadFactory {
         uint256 defaultMigrationTarget_,
         address standardImpl_,
         address taxImpl_,
-        address reflectionImpl_
+        address reflectionImpl_,
+        address vestingWallet_
     ) {
         if (bondingCurve_           == address(0)) revert ZeroAddress();
         if (defaultVirtualBNB_      == 0)          revert ZeroAmount();
@@ -235,6 +259,7 @@ contract LaunchpadFactory {
         if (standardImpl_           == address(0)) revert ZeroAddress();
         if (taxImpl_                == address(0)) revert ZeroAddress();
         if (reflectionImpl_         == address(0)) revert ZeroAddress();
+        if (vestingWallet_          == address(0)) revert ZeroAddress();
 
         owner                  = msg.sender;
         bondingCurve           = BondingCurve(payable(bondingCurve_));
@@ -246,6 +271,7 @@ contract LaunchpadFactory {
         standardImpl   = standardImpl_;
         taxImpl        = taxImpl_;
         reflectionImpl = reflectionImpl_;
+        vestingWallet  = vestingWallet_;
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -265,7 +291,7 @@ contract LaunchpadFactory {
         uint256 tradingBlock_;
         {
             Alloc memory a = _computeAlloc(_supplyFromOption(p.supplyOption), p.enableCreatorAlloc);
-            StandardToken(payable(token)).initForLaunchpad(
+            IStdInit(token).initForLaunchpad(
                 p.name, p.symbol, a.supply, address(this), address(bc), msg.sender, p.metaURI
             );
             _sendToBondingCurve(token, address(bc), a);
@@ -290,12 +316,12 @@ contract LaunchpadFactory {
         uint256 tradingBlock_;
         {
             Alloc memory a  = _computeAlloc(_supplyFromOption(p.supplyOption), p.enableCreatorAlloc);
-            TaxToken(token).initForLaunchpad(
+            ITaxRflInit(token).initForLaunchpad(
                 p.name, p.symbol, a.supply, address(this), address(bc), msg.sender, p.metaURI,
-                bc.pancakeRouter()
+                bc.pancakeRouter(), vestingWallet
             );
             _sendToBondingCurve(token, address(bc), a);
-            _registerWithCurve(bc, token, TaxToken(token).pancakePair(), a, p.enableAntibot, p.antibotBlocks);
+            _registerWithCurve(bc, token, ITaxRflInit(token).pancakePair(), a, p.enableAntibot, p.antibotBlocks);
             tradingBlock_ = p.enableAntibot ? block.number + p.antibotBlocks : block.number;
             emit TokenCreated(token, msg.sender, a.supply,
                 defaultVirtualBNB, defaultMigrationTarget, p.enableAntibot, tradingBlock_);
@@ -316,12 +342,12 @@ contract LaunchpadFactory {
         uint256 tradingBlock_;
         {
             Alloc memory a  = _computeAlloc(_supplyFromOption(p.supplyOption), p.enableCreatorAlloc);
-            ReflectionToken(token).initForLaunchpad(
+            ITaxRflInit(token).initForLaunchpad(
                 p.name, p.symbol, a.supply, address(this), address(bc), msg.sender, p.metaURI,
-                bc.pancakeRouter()
+                bc.pancakeRouter(), vestingWallet
             );
             _sendToBondingCurve(token, address(bc), a);
-            _registerWithCurve(bc, token, ReflectionToken(token).pancakePair(), a, p.enableAntibot, p.antibotBlocks);
+            _registerWithCurve(bc, token, ITaxRflInit(token).pancakePair(), a, p.enableAntibot, p.antibotBlocks);
             tradingBlock_ = p.enableAntibot ? block.number + p.antibotBlocks : block.number;
             emit TokenCreated(token, msg.sender, a.supply,
                 defaultVirtualBNB, defaultMigrationTarget, p.enableAntibot, tradingBlock_);
@@ -353,7 +379,7 @@ contract LaunchpadFactory {
         if (block.timestamp > deadline) revert DeadlineExpired();
         if (amountIn == 0) revert ZeroAmount();
         address bc = address(bondingCurve);
-        ILaunchpadToken(token_).transferFrom(msg.sender, bc, amountIn);
+        IERC20Min(token_).transferFrom(msg.sender, bc, amountIn);
         BondingCurve(payable(bc)).completeSell(token_, msg.sender, amountIn, minBNBOut, deadline);
     }
 
@@ -500,12 +526,13 @@ contract LaunchpadFactory {
     // INTERNAL HELPERS
     // ─────────────────────────────────────────────────────────────────────
 
-    /// @dev Transfer (liqTokens + bcTokens) to BondingCurve and vest creator tokens if any.
+    /// @dev Transfer (liqTokens + bcTokens) to BondingCurve; send creator tokens to VestingWallet.
     function _sendToBondingCurve(address token, address bc, Alloc memory a) internal {
-        ILaunchpadToken(token).transfer(bc, a.liqTokens + a.bcTokens);
+        IERC20Min(token).transfer(bc, a.liqTokens + a.bcTokens);
         if (a.creatorTokens > 0) {
-            ILaunchpadToken(token).transfer(token, a.creatorTokens);
-            ILaunchpadToken(token).setupVesting(msg.sender, a.creatorTokens);
+            address vw = vestingWallet;
+            IERC20Min(token).transfer(vw, a.creatorTokens);
+            IVestingWallet(vw).addVesting(token, msg.sender, a.creatorTokens);
         }
     }
 

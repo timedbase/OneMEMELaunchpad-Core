@@ -21,7 +21,8 @@ contracts/
 │   ├── TaxToken.sol             Buy/sell tax clone
 │   └── ReflectionToken.sol      RFI-style reflection clone
 ├── BondingCurve.sol             All AMM state, buy/sell/migrate execution, fee dispatch
-└── LaunchpadFactory.sol         Token creation, clone deployment, admin, trading pass-throughs
+├── LaunchpadFactory.sol         Token creation, clone deployment, admin, trading pass-throughs
+└── VestingWallet.sol            Shared vesting escrow for all creator allocations
 
 coremanagement/
 └── index.html                   Browser-based admin dashboard (MetaMask, BSC)
@@ -31,12 +32,13 @@ coremanagement/
 
 ## Architecture
 
-The system is split into two contracts with distinct responsibilities:
+The system is split into three contracts with distinct responsibilities:
 
 | Contract | Responsibilities |
 |----------|-----------------|
 | **LaunchpadFactory** | Token clone deployment (CREATE2), creation fee collection, default bonding-curve parameters, ownership + manager roles, timelocked configuration of BondingCurve, buy/sell/migrate convenience pass-throughs. `bondingCurve` address is immutable — set once at deployment. |
-| **BondingCurve** | All per-token AMM state (`TokenConfig`), buy/sell/migrate execution, trade fee collection and dispatch, DEX migration. Acts as the token's `factory` so it can call `setupVesting()` and `postMigrateSetup()` |
+| **BondingCurve** | All per-token AMM state (`TokenConfig`), buy/sell/migrate execution, trade fee collection and dispatch, DEX migration. Acts as the token's `factory` so it can call `postMigrateSetup()`. |
+| **VestingWallet** | Single shared vesting escrow for all tokens launched through the factory. Receives creator allocations at token creation. Beneficiaries claim linearly over 12 months. Owner may void any schedule, burning remaining tokens immediately. |
 
 Tokens are minted **directly to BondingCurve** at launch. The `factory` field on each token is set to `address(bondingCurve)` so BondingCurve has the authority to call token-internal lifecycle functions.
 
@@ -54,7 +56,8 @@ createToken / createTT / createRFL
   • 100 % of supply minted to BondingCurve
   • PancakeSwap pair created immediately (TAX/RFL tokens — empty, no liquidity yet)
   • _inBondingPhase = true  (taxes / reflection suppressed)
-  • Creator vesting tokens transferred to token contract as self-escrow
+  • TaxToken / ReflectionToken: VestingWallet excluded from fee and reflection during init
+  • If creator allocation enabled: 5 % transferred to VestingWallet, schedule registered
         │
         ▼
   Bonding-curve phase  (BondingCurve acts as AMM)
@@ -225,14 +228,19 @@ tokensToDeadWallet = tokensOut × penaltyBPS / 10000
 ## Creator Vesting
 
 - Optional 5 % allocation, linear vest over **12 months**.
-- The token contract itself acts as the vesting escrow — no separate contract required.
-- BondingCurve transfers creator tokens to the token contract and calls `setupVesting` atomically at launch.
-- **Claimable by the current token owner.** Ownership transfer passes vesting rights to the new owner.
+- Handled by a **single shared `VestingWallet` contract** — the same contract holds allocations for every token ever launched through the factory.
+- At token creation, the factory transfers creator tokens directly to VestingWallet and calls `addVesting(token, creator, amount)` atomically.
+- TaxToken and ReflectionToken exclude VestingWallet from fees and reflection during `initForLaunchpad`, so transfers to/from VestingWallet are always fee-free and never accumulate phantom reflection tokens.
+- Beneficiary claims against their own address — ownership transfer on the token has no effect on vesting rights.
 
 ```solidity
-token.claimVesting();         // msg.sender must be current owner
-token.claimableVesting();     // view: tokens available now
-token.transferOwnership(addr); // new owner inherits vesting rights
+// Beneficiary
+vestingWallet.claim(tokenAddress);                        // send claimable tokens to msg.sender
+vestingWallet.claimable(tokenAddress, beneficiary);       // view: tokens claimable now
+
+// VestingWallet owner
+vestingWallet.voidSchedule(tokenAddress, beneficiary);    // burn all remaining unvested tokens immediately
+vestingWallet.transferOwnership(newOwner);
 ```
 
 ---
@@ -300,7 +308,7 @@ await factory.createRFL(
 
 ### `StandardToken`
 
-Plain ERC-20. No taxes, no reflection. Vesting is supported if creator allocation is enabled.
+Plain ERC-20. No taxes, no reflection. Creator vesting supported via VestingWallet if creator allocation is enabled.
 
 ### `TaxToken`
 
@@ -308,6 +316,7 @@ Configurable buy/sell taxes with up to 5 components per side: marketing, team, t
 
 - Minimum `swapThreshold` is 0.02 % of total supply.
 - Router and PancakeSwap pair are configured at token creation; `postMigrateSetup()` activates normal tax/swap behaviour after migration.
+- VestingWallet is excluded from fees during init — transfers to/from it carry zero tax.
 
 ### `ReflectionToken`
 
@@ -319,12 +328,13 @@ RFI-style passive reflection plus optional custom reflection token distribution.
 - **Minimum balance threshold**: holders must hold at least 0.1 % of total supply to receive custom reflection distributions. The owner may raise this threshold but never lower it below 0.1 %.
 - Minimum `swapThreshold` is 0.02 % of total supply.
 - Router and PancakeSwap pair are configured at token creation; `postMigrateSetup()` activates normal behaviour after migration.
+- VestingWallet is excluded from both fees and reflection during init — it never accumulates phantom tokens and transfers out of it are tax-free.
 
 ---
 
 ## Deployment
 
-Each contract is deployed independently. Six transactions total.
+Each contract is deployed independently. Seven transactions total.
 
 ### 1. Deploy StandardToken
 
@@ -362,11 +372,23 @@ constructor(
     uint256 defaultMigrationTarget_, // BNB wei
     address standardImpl_,           // step 1 address
     address taxImpl_,                // step 2 address
-    address reflectionImpl_          // step 3 address
+    address reflectionImpl_,         // step 3 address
+    address vestingWallet_           // step 6 address — deploy VestingWallet first (see below)
 )
 ```
 
-### 6. Point BondingCurve at the factory
+### 6. Deploy VestingWallet
+
+```
+constructor(
+    address owner_,    // deployer EOA — can void schedules and transfer ownership
+    address factory_   // step 5 LaunchpadFactory address
+)
+```
+
+> **Note:** Steps 5 and 6 are mutually dependent — each needs the other's address. Deploy LaunchpadFactory first with a placeholder for `vestingWallet_`, then deploy VestingWallet, then call `factory.setVestingWallet(vestingWalletAddress)`. Alternatively, use a deployer script that computes addresses ahead of time (e.g. via CREATE2 or `vm.computeCreateAddress`).
+
+### 7. Point BondingCurve at the factory
 
 ```
 BondingCurve.setFactory(launchpadFactoryAddress)
@@ -411,6 +433,13 @@ Testnet BNB faucet: `https://testnet.bnbchain.org/faucet-smart`
 | `cancelAction(bytes32)` | Cancel a queued timelock action |
 | `rescueBNB(addr)` | Sweep stray BNB from BondingCurve (above active pool totals) to `addr` |
 
+### VestingWallet (instant)
+
+| Function | Description |
+|----------|-------------|
+| `voidSchedule(token, beneficiary)` | Burn all remaining unvested tokens for a given schedule — owner only |
+| `transferOwnership(newOwner)` | Transfer VestingWallet admin rights |
+
 ### BondingCurve Config (48h timelock, via factory)
 
 | Propose | Execute | Description |
@@ -438,12 +467,20 @@ Testnet BNB faucet: `https://testnet.bnbchain.org/faucet-smart`
 | `getAmountOutSell(token, tokensIn)` | `(bnbOut, feeBNB)` — sell quote |
 | `getSpotPrice(token)` | BNB per whole token ×1e18 |
 
+### On VestingWallet
+
+| Function | Returns |
+|----------|---------|
+| `claimable(token, beneficiary)` | Tokens claimable right now |
+| `schedules(token, beneficiary)` | `(total, start, claimed)` — full schedule |
+
 ### On LaunchpadFactory
 
 | Function | Returns |
 |----------|---------|
 | `predictTokenAddress(creator, salt, impl)` | Off-chain vanity salt mining helper |
 | `bondingCurve()` | Immutable BondingCurve address |
+| `vestingWallet()` | VestingWallet address |
 | `timelockExpiry(bytes32)` | Unix timestamp when a queued action unlocks |
 
 ---
@@ -458,6 +495,7 @@ Testnet BNB faucet: `https://testnet.bnbchain.org/faucet-smart`
 | Default migration target | BNB wei — set by factory owner/manager |
 | Timelock delay | 48 hours |
 | Vesting duration | 365 days linear |
+| Vesting escrow | Shared `VestingWallet` contract (one per deployment) |
 | Max buy/sell tax | 10 % (1 000 BPS) per side |
 | Min swap threshold | 0.02 % of token total supply |
 | Reflection token default taxes | 0 % — owner configures post-deployment |
@@ -465,7 +503,7 @@ Testnet BNB faucet: `https://testnet.bnbchain.org/faucet-smart`
 | Antibot range | 10–199 blocks |
 | LP lock destination | `0x000…dEaD` (permanent) |
 | Vanity address suffix | `0x1111` (last 4 hex digits) |
-| Compiler | `solc ^0.8.32`, `optimizer: 200 runs` (viaIR not required) |
+| Compiler | `solc ^0.8.32`, `optimizer: 200 runs` |
 
 ---
 

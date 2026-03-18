@@ -1,7 +1,16 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.32;
 
-import "../interfaces/ILaunchpadToken.sol";
+interface ILaunchpadToken {
+    function postMigrateSetup() external;
+    function metaURI() external view returns (string memory);
+    function setMetaURI(string calldata uri_) external;
+    function totalSupply() external view returns (uint256);
+    function balanceOf(address account) external view returns (uint256);
+    function transfer(address to, uint256 amount) external returns (bool);
+    function approve(address spender, uint256 amount) external returns (bool);
+    function transferFrom(address from, address to, uint256 amount) external returns (bool);
+}
 
 interface IPancakeRouter02RFL {
     function factory() external pure returns (address);
@@ -51,10 +60,6 @@ interface IPancakeFactoryRFL {
  *     whose balance meets the minimum threshold (default 0.02 % of total supply;
  *     owner may raise this but never lower it below 0.02 %).
  *
- * Vesting:
- *   - Creator tokens (5 % allocation) are held in address(this) as self-escrow.
- *   - _vestingBalance tracks this portion separately from accumulated taxes so
- *     swapAndDistribute never consumes unvested tokens.
  */
 contract ReflectionToken is ILaunchpadToken {
 
@@ -70,9 +75,7 @@ contract ReflectionToken is ILaunchpadToken {
     error DexAlreadyConfigured();
     error CannotReflectSelf();
     error CannotRescueOwnToken();
-    error VestingAlreadySet();
-    error NoVesting();
-    error NothingToClaim();
+
     error InsufficientBalance();
     error BNBTransferFailed();
     error BelowMinReflectionThreshold();
@@ -167,15 +170,6 @@ contract ReflectionToken is ILaunchpadToken {
 
     uint256 private _toSwapForReflection;
 
-    address public vestingCreator;
-    uint256 public vestingTotal;
-    uint256 public vestingStart;
-    uint256 public vestingClaimed;
-    uint256 private constant VESTING_DURATION = 365 days;
-
-    // Tracks the vesting escrow portion held in address(this).
-    // Excluded from swapAndDistribute so tax swaps never consume vested tokens.
-    uint256 private _vestingBalance;
 
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
@@ -191,8 +185,6 @@ contract ReflectionToken is ILaunchpadToken {
     event ReflectionTokenSet(address indexed token);
     event ReflectionMinBalanceSet(uint256 minBalance);
     event CustomReflectionDistributed(uint256 tokensSold, uint256 rewardDistributed, uint256 recipients);
-    event VestingSetup(address indexed creator, uint256 amount);
-    event VestingClaimed(address indexed owner, uint256 amount);
 
     modifier lockSwap()   { inSwap = true; _; inSwap = false; }
     modifier onlyOwner()  { if (msg.sender != _owner)   revert NotOwner();   _; }
@@ -220,7 +212,8 @@ contract ReflectionToken is ILaunchpadToken {
         address            bondingCurve_,
         address            tokenOwner_,
         string    calldata metaURI_,
-        address            router_
+        address            router_,
+        address            vestingWallet_
     ) external {
         if (_initialized)               revert AlreadyInitialized();
         if (factory_      == address(0)) revert ZeroAddress();
@@ -252,15 +245,17 @@ contract ReflectionToken is ILaunchpadToken {
         _isExcludedFromFee[tokenOwner_]    = true;
         _isExcludedFromFee[address(this)]  = true;
         _isExcludedFromFee[BURN_ADDRESS]   = true;
+        if (vestingWallet_ != address(0)) _isExcludedFromFee[vestingWallet_] = true;
 
         // factory holds all tokens and must use _tOwned.
-        // BondingCurve is also excluded: it holds large balances and must not
+        // BondingCurve, VestingWallet are also excluded: large balances that must not
         // receive or skew passive reflection distributions.
         _rOwned[factory_] = _rTotal;
         _excludeFromReflectionInternal(factory_);
         _excludeFromReflectionInternal(bondingCurve_);
         _excludeFromReflectionInternal(address(this));
         _excludeFromReflectionInternal(BURN_ADDRESS);
+        if (vestingWallet_ != address(0)) _excludeFromReflectionInternal(vestingWallet_);
 
         _metaURI = metaURI_;
 
@@ -389,11 +384,8 @@ contract ReflectionToken is ILaunchpadToken {
         bool takeFee = !(_isExcludedFromFee[from] || _isExcludedFromFee[to]);
 
         if (!_inBondingPhase && swapEnabled && takeFee && !inSwap && from != pancakePair) {
-            uint256 rawBalance = balanceOf(address(this));
-            uint256 taxBalance = rawBalance > _vestingBalance
-                ? rawBalance - _vestingBalance
-                : 0;
-            if (taxBalance > 0 && taxBalance >= swapThreshold) swapAndDistribute(taxBalance);
+            uint256 taxBalance = balanceOf(address(this));
+            if (taxBalance >= swapThreshold) swapAndDistribute(taxBalance);
         }
 
         _tokenTransfer(from, to, amount, takeFee);
@@ -774,10 +766,7 @@ contract ReflectionToken is ILaunchpadToken {
     }
 
     function manualSwap() external onlyOwner {
-        uint256 rawBalance = balanceOf(address(this));
-        uint256 taxBalance = rawBalance > _vestingBalance
-            ? rawBalance - _vestingBalance
-            : 0;
+        uint256 taxBalance = balanceOf(address(this));
         if (taxBalance == 0) revert ZeroAmount();
         swapAndDistribute(taxBalance);
     }
@@ -815,51 +804,6 @@ contract ReflectionToken is ILaunchpadToken {
     function excludedCount()                     public view returns (uint256) { return _excluded.length; }
     function excludedAt(uint256 i)               public view returns (address) { return _excluded[i]; }
     function inBondingPhase()                    public view returns (bool) { return _inBondingPhase; }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // CREATOR VESTING  (self-custodied in this contract)
-    // ─────────────────────────────────────────────────────────────────────
-
-    /**
-     * @notice Called once by the factory after transferring creator tokens here.
-     *         address(this) is excluded from both fees and reflection, so tokens
-     *         are held in _tOwned and transferred cleanly to the owner on claim.
-     */
-    function setupVesting(address creator_, uint256 amount_) external override onlyFactory {
-        if (vestingCreator != address(0)) revert VestingAlreadySet();
-        if (creator_ == address(0))       revert ZeroAddress();
-        if (amount_  == 0)                revert ZeroAmount();
-        vestingCreator  = creator_;
-        vestingTotal    = amount_;
-        vestingStart    = block.timestamp;
-        _vestingBalance = amount_;
-        emit VestingSetup(creator_, amount_);
-    }
-
-    /**
-     * @notice Claim linearly vested tokens.  Callable only by the current token owner.
-     *         If ownership is transferred, the new owner inherits vesting rights.
-     *         vestingCreator records the original recipient for transparency only.
-     */
-    function claimVesting() external {
-        if (msg.sender != _owner) revert NotOwner();
-        if (vestingTotal == 0)    revert NoVesting();
-        uint256 elapsed = block.timestamp - vestingStart;
-        if (elapsed > VESTING_DURATION) elapsed = VESTING_DURATION;
-        uint256 claimable = (vestingTotal * elapsed / VESTING_DURATION) - vestingClaimed;
-        if (claimable == 0) revert NothingToClaim();
-        vestingClaimed  += claimable;
-        _vestingBalance -= claimable;
-        _transfer(address(this), _owner, claimable);
-        emit VestingClaimed(_owner, claimable);
-    }
-
-    function claimableVesting() external view returns (uint256) {
-        if (vestingTotal == 0) return 0;
-        uint256 elapsed = block.timestamp - vestingStart;
-        if (elapsed > VESTING_DURATION) elapsed = VESTING_DURATION;
-        return (vestingTotal * elapsed / VESTING_DURATION) - vestingClaimed;
-    }
 
     receive() external payable {}
 }

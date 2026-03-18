@@ -25,6 +25,7 @@ const OUT_DIR = path.join(__dirname, 'out');
 const CONTRACT_FILES = [
   'contracts/BondingCurve.sol',
   'contracts/LaunchpadFactory.sol',
+  'contracts/VestingWallet.sol',
   'contracts/interfaces/ILaunchpadToken.sol',
   'contracts/interfaces/IPancakeRouter02.sol',
   'contracts/interfaces/IPostMigrate.sol',
