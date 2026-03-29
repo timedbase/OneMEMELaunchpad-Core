@@ -73,7 +73,7 @@ contract LaunchpadFactory {
         bytes32      salt;
     }
 
-    uint256 private constant LIQUIDITY_BPS = 3800;
+    uint256 private constant LIQUIDITY_BPS = 2500;
     uint256 private constant CREATOR_BPS   =  500;
     uint256 private constant BPS_DENOM     = 10_000;
     uint256 private constant MAX_TOTAL_FEE =  250;  // 2.5 %
