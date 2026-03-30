@@ -205,6 +205,7 @@
     <button class="tab-btn" data-tab="registry">Registry</button>
     <button class="tab-btn" data-tab="inspector">Inspector</button>
     <button class="tab-btn" data-tab="admin">Admin</button>
+    <button class="tab-btn" data-tab="peripherals">Peripherals</button>
   </div>
 
   <!-- ═══════════════════════════════════ OVERVIEW ═══════════════════════════════════ -->
@@ -326,6 +327,202 @@
   <!-- ═══════════════════════════════════ ADMIN ═════════════════════════════════════ -->
   <div class="tab-pane" id="tab-admin">
     <div id="adminContent"><div class="empty-state">Load a factory address first.</div></div>
+  </div>
+
+  <!-- ══════════════════════════════════ PERIPHERALS ════════════════════════════════ -->
+  <div class="tab-pane" id="tab-peripherals">
+
+    <!-- Address Setup -->
+    <div class="section">
+      <div class="section-title">Contract Addresses</div>
+      <div class="grid2">
+        <div class="form-group">
+          <label class="form-label">1MEMEBB Address</label>
+          <div class="form-row">
+            <input type="text" id="bbAddrInput" class="mono" placeholder="0x…" />
+            <button class="btn small" onclick="loadBB()">Load</button>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Collector Address</label>
+          <div class="form-row">
+            <input type="text" id="collectorAddrInput" class="mono" placeholder="0x…" />
+            <button class="btn small" onclick="loadCollector()">Load</button>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Vault A Address</label>
+          <div class="form-row">
+            <input type="text" id="vaultAAddrInput" class="mono" placeholder="0x…" />
+            <button class="btn small" onclick="loadVault('A')">Load</button>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Vault B Address</label>
+          <div class="form-row">
+            <input type="text" id="vaultBAddrInput" class="mono" placeholder="0x…" />
+            <button class="btn small" onclick="loadVault('B')">Load</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── 1MEMEBB ── -->
+    <div class="section">
+      <div class="section-title">1MEMEBB — BuyBack Contract</div>
+      <div id="bbStats"><div class="empty-state">Load a 1MEMEBB address above.</div></div>
+      <div id="bbActions" style="display:none;">
+        <div class="action-grid" style="margin-top:14px;">
+
+          <!-- BBnow -->
+          <div class="admin-card" id="bbNowCard">
+            <div class="admin-card-header">BBnow <small style="font-size:10px;color:var(--muted);">Open to anyone</small></div>
+            <div class="admin-card-body">
+              <p class="explain">Triggers a buyback with the current BNB balance tier. 0.005 BNB minimum.</p>
+              <div id="bbCooldownNote" style="font-size:12px;color:var(--muted);margin-bottom:10px;"></div>
+              <button class="btn full" onclick="doBBnow()">BBnow</button>
+            </div>
+          </div>
+
+          <!-- Set Cooldown -->
+          <div class="admin-card" id="bbCooldownCard">
+            <div class="admin-card-header">Set Cooldown <small style="font-size:10px;color:var(--muted);">Owner only</small></div>
+            <div class="admin-card-body">
+              <div class="form-row">
+                <div class="form-group"><label class="form-label">Seconds (1800 – 604800)</label><input type="number" id="bbCooldownInput" placeholder="3600" min="1800" max="604800" /></div>
+                <button class="btn" onclick="setBBcooldown()">Set</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Set Router -->
+          <div class="admin-card" id="bbRouterCard">
+            <div class="admin-card-header">Set Router <small style="font-size:10px;color:var(--muted);">Owner only</small></div>
+            <div class="admin-card-body">
+              <div class="form-row">
+                <div class="form-group"><label class="form-label">Router Address</label><input type="text" id="bbRouterInput" class="mono" placeholder="0x…" /></div>
+                <button class="btn" onclick="setBBrouter()">Set</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Rescue Token -->
+          <div class="admin-card" id="bbRescueCard">
+            <div class="admin-card-header">Rescue Token <small style="font-size:10px;color:var(--muted);">Owner only</small></div>
+            <div class="admin-card-body">
+              <div class="form-group"><label class="form-label">Token Address</label><input type="text" id="bbRescueToken" class="mono" placeholder="0x…" /></div>
+              <div class="form-row" style="margin-top:8px;">
+                <div class="form-group"><label class="form-label">Amount (0 = all)</label><input type="text" id="bbRescueAmount" placeholder="0" /></div>
+                <button class="btn" onclick="doBBrescueToken()">Rescue</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Withdraw BNB -->
+          <div class="admin-card" id="bbWithdrawBNBCard">
+            <div class="admin-card-header">Withdraw BNB <small style="font-size:10px;color:var(--muted);">Owner only</small></div>
+            <div class="admin-card-body">
+              <div class="form-row">
+                <div class="form-group"><label class="form-label">Amount BNB (0 = all)</label><input type="number" id="bbWithdrawBNBInput" placeholder="0" min="0" step="0.001" /></div>
+                <button class="btn danger" onclick="doBBwithdrawBNB()">Withdraw</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Transfer Ownership -->
+          <div class="admin-card" id="bbOwnerCard">
+            <div class="admin-card-header">Transfer Ownership <small style="font-size:10px;color:var(--muted);">Owner only</small></div>
+            <div class="admin-card-body">
+              <div class="form-row">
+                <div class="form-group"><label class="form-label">New Owner</label><input type="text" id="bbNewOwner" class="mono" placeholder="0x…" /></div>
+                <button class="btn danger" onclick="doBBtransferOwnership()">Propose</button>
+              </div>
+              <div id="bbAcceptOwnerRow" style="display:none;margin-top:10px;">
+                <button class="btn ok full" onclick="doBBacceptOwnership()">Accept Ownership</button>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Collector ── -->
+    <div class="section">
+      <div class="section-title">Collector — Revenue Splitter</div>
+      <div id="collectorStats"><div class="empty-state">Load a Collector address above.</div></div>
+      <div id="collectorActions" style="display:none;">
+        <div class="action-grid" style="margin-top:14px;">
+
+          <!-- Disperse -->
+          <div class="admin-card">
+            <div class="admin-card-header">Disperse <small style="font-size:10px;color:var(--muted);">Open to anyone</small></div>
+            <div class="admin-card-body">
+              <p class="explain">Splits entire BNB balance to all six recipients. 36-hour cooldown. 0.005 BNB minimum.</p>
+              <div id="collectorDisperseNote" style="font-size:12px;color:var(--muted);margin-bottom:10px;"></div>
+              <button class="btn full" onclick="doDisperse()">Disperse</button>
+            </div>
+          </div>
+
+          <!-- Set Recipients -->
+          <div class="admin-card" style="grid-column:span 2;">
+            <div class="admin-card-header">Set Recipients <small style="font-size:10px;color:var(--muted);">Owner only · 48h cooldown</small></div>
+            <div class="admin-card-body">
+              <div id="collectorRecipientCooldown" style="font-size:12px;color:var(--muted);margin-bottom:10px;"></div>
+              <div class="grid3" style="gap:8px;">
+                <div class="form-group"><label class="form-label">CR8 (40%)</label><input type="text" id="rcCR8" class="mono" placeholder="0x…" /></div>
+                <div class="form-group"><label class="form-label">MTN (14%)</label><input type="text" id="rcMTN" class="mono" placeholder="0x…" /></div>
+                <div class="form-group"><label class="form-label">BB (8% + dust)</label><input type="text" id="rcBB" class="mono" placeholder="0x…" /></div>
+                <div class="form-group"><label class="form-label">TW (8%)</label><input type="text" id="rcTW" class="mono" placeholder="0x…" /></div>
+                <div class="form-group"><label class="form-label">HK (8%)</label><input type="text" id="rcHK" class="mono" placeholder="0x…" /></div>
+                <div class="form-group"><label class="form-label">KJC (22%)</label><input type="text" id="rcKJC" class="mono" placeholder="0x…" /></div>
+              </div>
+              <button class="btn full" style="margin-top:12px;" onclick="doSetRecipients()">Set Recipients</button>
+            </div>
+          </div>
+
+          <!-- Rescue Token -->
+          <div class="admin-card">
+            <div class="admin-card-header">Rescue Token <small style="font-size:10px;color:var(--muted);">Owner only</small></div>
+            <div class="admin-card-body">
+              <div class="form-group"><label class="form-label">Token Address</label><input type="text" id="collectorRescueToken" class="mono" placeholder="0x…" /></div>
+              <div class="form-row" style="margin-top:8px;">
+                <div class="form-group"><label class="form-label">Amount (0 = all)</label><input type="text" id="collectorRescueAmount" placeholder="0" /></div>
+                <button class="btn" onclick="doCollectorRescueToken()">Rescue</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Transfer Ownership -->
+          <div class="admin-card">
+            <div class="admin-card-header">Transfer Ownership <small style="font-size:10px;color:var(--muted);">Owner only</small></div>
+            <div class="admin-card-body">
+              <div class="form-row">
+                <div class="form-group"><label class="form-label">New Owner</label><input type="text" id="collectorNewOwner" class="mono" placeholder="0x…" /></div>
+                <button class="btn danger" onclick="doCollectorTransferOwnership()">Propose</button>
+              </div>
+              <div id="collectorAcceptOwnerRow" style="display:none;margin-top:10px;">
+                <button class="btn ok full" onclick="doCollectorAcceptOwnership()">Accept Ownership</button>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Vaults ── -->
+    <div class="grid2">
+      <div class="section" id="vaultASection">
+        <div class="section-title">Vault A — 2-of-3 Multisig</div>
+        <div id="vaultAContent"><div class="empty-state">Load Vault A address above.</div></div>
+      </div>
+      <div class="section" id="vaultBSection">
+        <div class="section-title">Vault B — 2-of-3 Multisig</div>
+        <div id="vaultBContent"><div class="empty-state">Load Vault B address above.</div></div>
+      </div>
+    </div>
+
   </div>
 
 </div>
@@ -1478,6 +1675,491 @@ async function tlCancel(actionKey) {
     toast('Cancel tx sent…','warn',8000); await tx.wait();
     toast('Action cancelled','ok'); await refreshAll();
   } catch(e) { toast('Failed: '+(e.reason||e.message||e),'danger'); }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PERIPHERAL ABIs
+// ═══════════════════════════════════════════════════════════════════════════════
+const BB_ABI = [
+  'function owner() view returns (address)',
+  'function pendingOwner() view returns (address)',
+  'function router() view returns (address)',
+  'function buyToken() view returns (address)',
+  'function cooldown() view returns (uint256)',
+  'function lastBuyAt() view returns (uint256)',
+  'function cooldownRemaining() view returns (uint256)',
+  'function BBnow()',
+  'function setRouter(address)',
+  'function setBuyToken(address)',
+  'function setCooldown(uint256)',
+  'function rescueToken(address,uint256)',
+  'function withdrawBNB(uint256)',
+  'function transferOwnership(address)',
+  'function acceptOwnership()',
+];
+
+const COLLECTOR_ABI = [
+  'function owner() view returns (address)',
+  'function pendingOwner() view returns (address)',
+  'function CR8() view returns (address)',
+  'function MTN() view returns (address)',
+  'function BB() view returns (address)',
+  'function TW() view returns (address)',
+  'function HK() view returns (address)',
+  'function KJC() view returns (address)',
+  'function lastDisperse() view returns (uint256)',
+  'function lastRecipientUpdate() view returns (uint256)',
+  'function disperseCooldownRemaining() view returns (uint256)',
+  'function recipientCooldownRemaining() view returns (uint256)',
+  'function Disperse()',
+  'function setRecipients(address,address,address,address,address,address)',
+  'function rescueToken(address,uint256)',
+  'function transferOwnership(address)',
+  'function acceptOwnership()',
+];
+
+const VAULT_ABI = [
+  'function THRESHOLD() view returns (uint8)',
+  'function SIGNER_COUNT() view returns (uint8)',
+  'function signers(uint256) view returns (address)',
+  'function proposalCount() view returns (uint256)',
+  'function isSigner(address) view returns (bool)',
+  'function confirmed(uint256,address) view returns (bool)',
+  'function getProposal(uint256) view returns (address to, uint256 value, bytes data, address proposer, uint8 confirmCount, bool executed, bool cancelled, bool canExecute)',
+  'function getSignerConfirmations(uint256) view returns (bool[3])',
+  'function getProposalRange(uint256,uint256) view returns (uint256[],address[],uint256[],address[],uint8[],bool[],bool[])',
+  'function propose(address,uint256,bytes) returns (uint256)',
+  'function confirm(uint256)',
+  'function revoke(uint256)',
+  'function execute(uint256)',
+  'function cancel(uint256)',
+];
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PERIPHERAL STATE
+// ═══════════════════════════════════════════════════════════════════════════════
+let bbContract = null, bbAddr = null;
+let collectorContract = null, collectorAddr = null;
+const vaultContracts = { A: null, B: null };
+const vaultAddrs     = { A: null, B: null };
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PERIPHERAL — LOAD
+// ═══════════════════════════════════════════════════════════════════════════════
+async function loadBB() {
+  const addr = document.getElementById('bbAddrInput').value.trim();
+  if (!ethers.isAddress(addr)) { toast('Invalid 1MEMEBB address', 'danger'); return; }
+  bbAddr = addr;
+  bbContract = new ethers.Contract(addr, BB_ABI, signer || provider);
+  await refreshBB();
+  toast('1MEMEBB loaded', 'ok');
+}
+
+async function loadCollector() {
+  const addr = document.getElementById('collectorAddrInput').value.trim();
+  if (!ethers.isAddress(addr)) { toast('Invalid Collector address', 'danger'); return; }
+  collectorAddr = addr;
+  collectorContract = new ethers.Contract(addr, COLLECTOR_ABI, signer || provider);
+  await refreshCollector();
+  toast('Collector loaded', 'ok');
+}
+
+async function loadVault(id) {
+  const addr = document.getElementById(`vault${id}AddrInput`).value.trim();
+  if (!ethers.isAddress(addr)) { toast(`Invalid Vault ${id} address`, 'danger'); return; }
+  vaultAddrs[id] = addr;
+  vaultContracts[id] = new ethers.Contract(addr, VAULT_ABI, signer || provider);
+  await refreshVault(id);
+  toast(`Vault ${id} loaded`, 'ok');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PERIPHERAL — 1MEMEBB REFRESH
+// ═══════════════════════════════════════════════════════════════════════════════
+async function refreshBB() {
+  if (!bbContract) return;
+  try {
+    const [owner, pending, routerAddr, buyToken, cooldown, lastBuyAt, cdLeft, bnbBal] = await Promise.all([
+      bbContract.owner(),
+      bbContract.pendingOwner(),
+      bbContract.router(),
+      bbContract.buyToken(),
+      bbContract.cooldown(),
+      bbContract.lastBuyAt(),
+      bbContract.cooldownRemaining(),
+      provider.getBalance(bbAddr),
+    ]);
+    const isPendingOwner = walletAddress && pending !== ethers.ZeroAddress && pending.toLowerCase() === walletAddress.toLowerCase();
+
+    let h = '<div class="stats-grid">';
+    h += statCard('Owner', short(owner), owner);
+    h += statCard('BNB Balance', fmtBNB(bnbBal));
+    h += statCard('Router', short(routerAddr), routerAddr);
+    h += statCard('Buy Token', short(buyToken), buyToken);
+    h += statCard('Cooldown', Number(cooldown) + 's');
+    h += statCard('Last Buy', lastBuyAt > 0n ? new Date(Number(lastBuyAt)*1000).toLocaleString() : '—');
+    h += '</div>';
+    document.getElementById('bbStats').innerHTML = h;
+
+    const cdNote = document.getElementById('bbCooldownNote');
+    if (cdNote) cdNote.textContent = cdLeft > 0n ? `Cooldown: ${formatCountdown(BigInt(now()) + cdLeft)}` : 'Ready to buy';
+
+    const acceptRow = document.getElementById('bbAcceptOwnerRow');
+    if (acceptRow) acceptRow.style.display = isPendingOwner ? 'block' : 'none';
+
+    document.getElementById('bbActions').style.display = 'block';
+  } catch(e) { toast('Error loading 1MEMEBB: ' + (e.message||e), 'danger'); }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PERIPHERAL — 1MEMEBB ACTIONS
+// ═══════════════════════════════════════════════════════════════════════════════
+async function doBBnow() {
+  if (!signer) { toast('Connect wallet', 'warn'); return; }
+  if (!bbAddr) { toast('Load 1MEMEBB first', 'warn'); return; }
+  try {
+    const c = new ethers.Contract(bbAddr, BB_ABI, signer);
+    const tx = await c.BBnow();
+    toast('BBnow tx sent…', 'warn', 8000); await tx.wait();
+    toast('Buyback executed!', 'ok'); await refreshBB();
+  } catch(e) { toast('BBnow failed: ' + (e.reason||e.message||e), 'danger'); }
+}
+
+async function setBBcooldown() {
+  if (!signer) { toast('Connect wallet', 'warn'); return; }
+  const val = document.getElementById('bbCooldownInput').value;
+  if (!val) { toast('Enter seconds', 'warn'); return; }
+  try {
+    const c = new ethers.Contract(bbAddr, BB_ABI, signer);
+    const tx = await c.setCooldown(BigInt(val));
+    toast('Tx sent…', 'warn', 8000); await tx.wait();
+    toast('Cooldown updated', 'ok'); await refreshBB();
+  } catch(e) { toast('Failed: ' + (e.reason||e.message||e), 'danger'); }
+}
+
+async function setBBrouter() {
+  if (!signer) { toast('Connect wallet', 'warn'); return; }
+  const addr = document.getElementById('bbRouterInput').value.trim();
+  if (!ethers.isAddress(addr)) { toast('Invalid address', 'danger'); return; }
+  try {
+    const c = new ethers.Contract(bbAddr, BB_ABI, signer);
+    const tx = await c.setRouter(addr);
+    toast('Tx sent…', 'warn', 8000); await tx.wait();
+    toast('Router updated', 'ok'); await refreshBB();
+  } catch(e) { toast('Failed: ' + (e.reason||e.message||e), 'danger'); }
+}
+
+async function doBBrescueToken() {
+  if (!signer) { toast('Connect wallet', 'warn'); return; }
+  const token = document.getElementById('bbRescueToken').value.trim();
+  const amt   = document.getElementById('bbRescueAmount').value.trim();
+  if (!ethers.isAddress(token)) { toast('Invalid token address', 'danger'); return; }
+  try {
+    const c = new ethers.Contract(bbAddr, BB_ABI, signer);
+    const amtWei = amt && amt !== '0' ? ethers.parseEther(amt) : 0n;
+    const tx = await c.rescueToken(token, amtWei);
+    toast('Tx sent…', 'warn', 8000); await tx.wait();
+    toast('Token rescued', 'ok');
+  } catch(e) { toast('Failed: ' + (e.reason||e.message||e), 'danger'); }
+}
+
+async function doBBwithdrawBNB() {
+  if (!signer) { toast('Connect wallet', 'warn'); return; }
+  const amt = document.getElementById('bbWithdrawBNBInput').value.trim();
+  if (!confirm('Withdraw BNB from 1MEMEBB to owner?')) return;
+  try {
+    const c = new ethers.Contract(bbAddr, BB_ABI, signer);
+    const amtWei = amt && parseFloat(amt) > 0 ? ethers.parseEther(amt) : 0n;
+    const tx = await c.withdrawBNB(amtWei);
+    toast('Tx sent…', 'warn', 8000); await tx.wait();
+    toast('BNB withdrawn', 'ok'); await refreshBB();
+  } catch(e) { toast('Failed: ' + (e.reason||e.message||e), 'danger'); }
+}
+
+async function doBBtransferOwnership() {
+  if (!signer) { toast('Connect wallet', 'warn'); return; }
+  const addr = document.getElementById('bbNewOwner').value.trim();
+  if (!ethers.isAddress(addr)) { toast('Invalid address', 'danger'); return; }
+  if (!confirm(`Transfer 1MEMEBB ownership to ${addr}?`)) return;
+  try {
+    const c = new ethers.Contract(bbAddr, BB_ABI, signer);
+    const tx = await c.transferOwnership(addr);
+    toast('Tx sent…', 'warn', 8000); await tx.wait();
+    toast('Transfer proposed', 'ok'); await refreshBB();
+  } catch(e) { toast('Failed: ' + (e.reason||e.message||e), 'danger'); }
+}
+
+async function doBBacceptOwnership() {
+  if (!signer) { toast('Connect wallet', 'warn'); return; }
+  try {
+    const c = new ethers.Contract(bbAddr, BB_ABI, signer);
+    const tx = await c.acceptOwnership();
+    toast('Tx sent…', 'warn', 8000); await tx.wait();
+    toast('Ownership accepted!', 'ok'); await refreshBB();
+  } catch(e) { toast('Failed: ' + (e.reason||e.message||e), 'danger'); }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PERIPHERAL — COLLECTOR REFRESH
+// ═══════════════════════════════════════════════════════════════════════════════
+async function refreshCollector() {
+  if (!collectorContract) return;
+  try {
+    const [owner, pending, cr8, mtn, bb, tw, hk, kjc, cdDisp, cdRec, bnbBal] = await Promise.all([
+      collectorContract.owner(),
+      collectorContract.pendingOwner(),
+      collectorContract.CR8(),
+      collectorContract.MTN(),
+      collectorContract.BB(),
+      collectorContract.TW(),
+      collectorContract.HK(),
+      collectorContract.KJC(),
+      collectorContract.disperseCooldownRemaining(),
+      collectorContract.recipientCooldownRemaining(),
+      provider.getBalance(collectorAddr),
+    ]);
+    const isPendingOwner = walletAddress && pending !== ethers.ZeroAddress && pending.toLowerCase() === walletAddress.toLowerCase();
+    const recipientsSet = cr8 !== ethers.ZeroAddress;
+
+    let h = '<div class="stats-grid">';
+    h += statCard('Owner', short(owner), owner);
+    h += statCard('BNB Balance', fmtBNB(bnbBal));
+    if (recipientsSet) {
+      h += statCard('CR8 (40%)', short(cr8), cr8);
+      h += statCard('MTN (14%)', short(mtn), mtn);
+      h += statCard('BB (8%+dust)', short(bb), bb);
+      h += statCard('TW (8%)', short(tw), tw);
+      h += statCard('HK (8%)', short(hk), hk);
+      h += statCard('KJC (22%)', short(kjc), kjc);
+    } else {
+      h += statCard('Recipients', '<span class="badge warn">Not configured</span>', null);
+    }
+    h += '</div>';
+    document.getElementById('collectorStats').innerHTML = h;
+
+    const dNote = document.getElementById('collectorDisperseNote');
+    if (dNote) dNote.textContent = cdDisp > 0n ? `Cooldown: ${formatCountdown(BigInt(now()) + cdDisp)}` : 'Ready to disperse';
+
+    const rNote = document.getElementById('collectorRecipientCooldown');
+    if (rNote) rNote.textContent = cdRec > 0n ? `Recipient update cooldown: ${formatCountdown(BigInt(now()) + cdRec)}` : 'Recipients can be updated';
+
+    const acceptRow = document.getElementById('collectorAcceptOwnerRow');
+    if (acceptRow) acceptRow.style.display = isPendingOwner ? 'block' : 'none';
+
+    document.getElementById('collectorActions').style.display = 'block';
+  } catch(e) { toast('Error loading Collector: ' + (e.message||e), 'danger'); }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PERIPHERAL — COLLECTOR ACTIONS
+// ═══════════════════════════════════════════════════════════════════════════════
+async function doDisperse() {
+  if (!signer) { toast('Connect wallet', 'warn'); return; }
+  if (!collectorAddr) { toast('Load Collector first', 'warn'); return; }
+  try {
+    const c = new ethers.Contract(collectorAddr, COLLECTOR_ABI, signer);
+    const tx = await c.Disperse();
+    toast('Disperse tx sent…', 'warn', 8000); await tx.wait();
+    toast('Dispersed!', 'ok'); await refreshCollector();
+  } catch(e) { toast('Disperse failed: ' + (e.reason||e.message||e), 'danger'); }
+}
+
+async function doSetRecipients() {
+  if (!signer) { toast('Connect wallet', 'warn'); return; }
+  const addrs = ['rcCR8','rcMTN','rcBB','rcTW','rcHK','rcKJC'].map(id => document.getElementById(id).value.trim());
+  if (addrs.some(a => !ethers.isAddress(a))) { toast('All six addresses must be valid', 'danger'); return; }
+  if (!confirm('Update all six recipient addresses?')) return;
+  try {
+    const c = new ethers.Contract(collectorAddr, COLLECTOR_ABI, signer);
+    const tx = await c.setRecipients(...addrs);
+    toast('Tx sent…', 'warn', 8000); await tx.wait();
+    toast('Recipients updated', 'ok'); await refreshCollector();
+  } catch(e) { toast('Failed: ' + (e.reason||e.message||e), 'danger'); }
+}
+
+async function doCollectorRescueToken() {
+  if (!signer) { toast('Connect wallet', 'warn'); return; }
+  const token = document.getElementById('collectorRescueToken').value.trim();
+  const amt   = document.getElementById('collectorRescueAmount').value.trim();
+  if (!ethers.isAddress(token)) { toast('Invalid token address', 'danger'); return; }
+  try {
+    const c = new ethers.Contract(collectorAddr, COLLECTOR_ABI, signer);
+    const amtWei = amt && amt !== '0' ? ethers.parseEther(amt) : 0n;
+    const tx = await c.rescueToken(token, amtWei);
+    toast('Tx sent…', 'warn', 8000); await tx.wait();
+    toast('Token rescued', 'ok');
+  } catch(e) { toast('Failed: ' + (e.reason||e.message||e), 'danger'); }
+}
+
+async function doCollectorTransferOwnership() {
+  if (!signer) { toast('Connect wallet', 'warn'); return; }
+  const addr = document.getElementById('collectorNewOwner').value.trim();
+  if (!ethers.isAddress(addr)) { toast('Invalid address', 'danger'); return; }
+  if (!confirm(`Transfer Collector ownership to ${addr}?`)) return;
+  try {
+    const c = new ethers.Contract(collectorAddr, COLLECTOR_ABI, signer);
+    const tx = await c.transferOwnership(addr);
+    toast('Tx sent…', 'warn', 8000); await tx.wait();
+    toast('Transfer proposed', 'ok'); await refreshCollector();
+  } catch(e) { toast('Failed: ' + (e.reason||e.message||e), 'danger'); }
+}
+
+async function doCollectorAcceptOwnership() {
+  if (!signer) { toast('Connect wallet', 'warn'); return; }
+  try {
+    const c = new ethers.Contract(collectorAddr, COLLECTOR_ABI, signer);
+    const tx = await c.acceptOwnership();
+    toast('Tx sent…', 'warn', 8000); await tx.wait();
+    toast('Ownership accepted!', 'ok'); await refreshCollector();
+  } catch(e) { toast('Failed: ' + (e.reason||e.message||e), 'danger'); }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PERIPHERAL — VAULT REFRESH
+// ═══════════════════════════════════════════════════════════════════════════════
+async function refreshVault(id) {
+  const vc = vaultContracts[id];
+  const va = vaultAddrs[id];
+  if (!vc || !va) return;
+  const container = document.getElementById(`vault${id}Content`);
+  try {
+    const [s0, s1, s2, count, bnbBal] = await Promise.all([
+      vc.signers(0), vc.signers(1), vc.signers(2),
+      vc.proposalCount(),
+      provider.getBalance(va),
+    ]);
+    const walletIsSigner = walletAddress && [s0,s1,s2].some(s => s.toLowerCase() === walletAddress.toLowerCase());
+    const countN = Number(count);
+    const startIdx = Math.max(0, countN - 10);
+
+    let proposals = [];
+    if (countN > 0) {
+      const [ids, tos, values, proposers, confirmCounts, executeds, cancelleds] =
+        await vc.getProposalRange(startIdx, countN);
+      for (let i = 0; i < ids.length; i++) {
+        proposals.push({ id: ids[i], to: tos[i], value: values[i], proposer: proposers[i], confirmCount: confirmCounts[i], executed: executeds[i], cancelled: cancelleds[i] });
+      }
+    }
+
+    let h = '';
+    // Stats
+    h += `<div class="stats-grid" style="margin-bottom:14px;">`;
+    h += statCard('BNB Balance', fmtBNB(bnbBal));
+    h += statCard('Signer 0', short(s0), s0);
+    h += statCard('Signer 1', short(s1), s1);
+    h += statCard('Signer 2', short(s2), s2);
+    h += statCard('Proposals', countN.toString());
+    h += `</div>`;
+
+    if (walletAddress && !walletIsSigner) {
+      h += `<div class="tl-strip pending" style="margin-bottom:12px;">Connected wallet is not a signer of this vault.</div>`;
+    }
+
+    // Propose form
+    h += `<div class="admin-card" style="margin-bottom:12px;">
+      <div class="admin-card-header">Propose Transaction</div>
+      <div class="admin-card-body">
+        <div class="form-group" style="margin-bottom:8px;"><label class="form-label">Target Address</label><input type="text" id="vault${id}To" class="mono" placeholder="0x…" /></div>
+        <div class="form-group" style="margin-bottom:8px;"><label class="form-label">BNB Value</label><input type="number" id="vault${id}Value" placeholder="0" min="0" step="0.001" /></div>
+        <div class="form-group" style="margin-bottom:8px;"><label class="form-label">Calldata (hex, empty for BNB transfer)</label><input type="text" id="vault${id}Data" class="mono" placeholder="0x" /></div>
+        <button class="btn full" onclick="doVaultPropose('${id}')" ${!walletIsSigner?'disabled':''}>Propose</button>
+      </div>
+    </div>`;
+
+    // Proposal list
+    h += `<div class="section-title" style="margin-bottom:10px;">Proposals (last ${proposals.length} of ${countN})</div>`;
+    if (proposals.length === 0) {
+      h += `<div class="empty-state" style="padding:20px;">No proposals yet.</div>`;
+    } else {
+      proposals.slice().reverse().forEach(p => {
+        const pid = Number(p.id);
+        const statusBadge = p.executed ? '<span class="badge ok">Executed</span>'
+          : p.cancelled ? '<span class="badge muted">Cancelled</span>'
+          : p.confirmCount >= 2 ? '<span class="badge accent">Ready</span>'
+          : '<span class="badge warn">Pending</span>';
+        const canConfirm = !p.executed && !p.cancelled && walletIsSigner;
+        const canExecute = !p.executed && !p.cancelled && p.confirmCount >= 2 && walletIsSigner;
+        h += `<div class="admin-card" style="margin-bottom:8px;">
+          <div class="admin-card-header" style="font-size:12px;">
+            #${pid} ${statusBadge}
+            <span style="font-size:10px;color:var(--muted);">Confirms: ${p.confirmCount}/2 · To: ${short(p.to)} · ${parseFloat(ethers.formatEther(p.value)).toFixed(4)} BNB</span>
+          </div>
+          <div class="admin-card-body" style="padding:10px 14px;">
+            <div style="font-size:11px;color:var(--muted);margin-bottom:8px;">Proposer: <span class="mono">${short(p.proposer)}</span></div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;">
+              <button class="btn small" onclick="doVaultConfirm('${id}',${pid})" ${!canConfirm?'disabled':''}>Confirm</button>
+              <button class="btn secondary small" onclick="doVaultRevoke('${id}',${pid})" ${!canConfirm?'disabled':''}>Revoke</button>
+              <button class="btn ok small" onclick="doVaultExecute('${id}',${pid})" ${!canExecute?'disabled':''}>Execute</button>
+              <button class="btn danger small" onclick="doVaultCancel('${id}',${pid})" ${!canConfirm||p.proposer.toLowerCase()!==(walletAddress||'').toLowerCase()?'disabled':''}>Cancel</button>
+            </div>
+          </div>
+        </div>`;
+      });
+    }
+
+    container.innerHTML = h;
+  } catch(e) { container.innerHTML = `<div class="empty-state">Error loading Vault ${id}: ${esc(e.message||String(e))}</div>`; console.error(e); }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PERIPHERAL — VAULT ACTIONS
+// ═══════════════════════════════════════════════════════════════════════════════
+async function doVaultPropose(id) {
+  if (!signer) { toast('Connect wallet', 'warn'); return; }
+  const to   = document.getElementById(`vault${id}To`).value.trim();
+  const val  = document.getElementById(`vault${id}Value`).value.trim();
+  const data = document.getElementById(`vault${id}Data`).value.trim() || '0x';
+  if (!ethers.isAddress(to)) { toast('Invalid target address', 'danger'); return; }
+  try {
+    const c = new ethers.Contract(vaultAddrs[id], VAULT_ABI, signer);
+    const valueWei = val && parseFloat(val) > 0 ? ethers.parseEther(val) : 0n;
+    const tx = await c.propose(to, valueWei, data);
+    toast('Proposal tx sent…', 'warn', 8000); await tx.wait();
+    toast('Proposal submitted!', 'ok'); await refreshVault(id);
+  } catch(e) { toast('Propose failed: ' + (e.reason||e.message||e), 'danger'); }
+}
+
+async function doVaultConfirm(id, pid) {
+  if (!signer) { toast('Connect wallet', 'warn'); return; }
+  try {
+    const c = new ethers.Contract(vaultAddrs[id], VAULT_ABI, signer);
+    const tx = await c.confirm(pid);
+    toast('Confirm tx sent…', 'warn', 8000); await tx.wait();
+    toast('Confirmed!', 'ok'); await refreshVault(id);
+  } catch(e) { toast('Confirm failed: ' + (e.reason||e.message||e), 'danger'); }
+}
+
+async function doVaultRevoke(id, pid) {
+  if (!signer) { toast('Connect wallet', 'warn'); return; }
+  if (!confirm(`Revoke confirmation on proposal #${pid}?`)) return;
+  try {
+    const c = new ethers.Contract(vaultAddrs[id], VAULT_ABI, signer);
+    const tx = await c.revoke(pid);
+    toast('Revoke tx sent…', 'warn', 8000); await tx.wait();
+    toast('Revoked!', 'ok'); await refreshVault(id);
+  } catch(e) { toast('Revoke failed: ' + (e.reason||e.message||e), 'danger'); }
+}
+
+async function doVaultExecute(id, pid) {
+  if (!signer) { toast('Connect wallet', 'warn'); return; }
+  if (!confirm(`Execute proposal #${pid}?`)) return;
+  try {
+    const c = new ethers.Contract(vaultAddrs[id], VAULT_ABI, signer);
+    const tx = await c.execute(pid);
+    toast('Execute tx sent…', 'warn', 8000); await tx.wait();
+    toast('Executed!', 'ok'); await refreshVault(id);
+  } catch(e) { toast('Execute failed: ' + (e.reason||e.message||e), 'danger'); }
+}
+
+async function doVaultCancel(id, pid) {
+  if (!signer) { toast('Connect wallet', 'warn'); return; }
+  if (!confirm(`Cancel proposal #${pid}? Only you (proposer) can cancel.`)) return;
+  try {
+    const c = new ethers.Contract(vaultAddrs[id], VAULT_ABI, signer);
+    const tx = await c.cancel(pid);
+    toast('Cancel tx sent…', 'warn', 8000); await tx.wait();
+    toast('Cancelled!', 'ok'); await refreshVault(id);
+  } catch(e) { toast('Cancel failed: ' + (e.reason||e.message||e), 'danger'); }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

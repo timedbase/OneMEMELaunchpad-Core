@@ -1,0 +1,45 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  --bg: #0d0d0f;
+  --surface: #141417;
+  --border: #242428;
+  --accent: #f0b90b;
+  --accent-2: #e8a800;
+  --danger: #e05252;
+  --ok: #42b883;
+  --warn: #f0a30b;
+  --text: #e8e8ed;
+  --muted: #7a7a8a;
+  --radius: 10px;
+  --gap: 16px;
+}
+
+body {
+  font-family: system-ui, -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.shell {
+  max-width: 1160px;
+  margin: 0 auto;
+  padding: 0 var(--gap) 60px;
+}
+
+@layer components {
+  .empty-state {
+    @apply text-center text-muted py-10 text-sm;
+  }
+}
