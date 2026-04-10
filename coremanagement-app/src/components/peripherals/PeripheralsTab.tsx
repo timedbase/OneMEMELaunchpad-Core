@@ -1,113 +1,100 @@
+import { useState } from 'react'
 import { useWeb3 } from '../../lib/web3-context'
 import { Badge } from '../ui/Badge'
+import BBPanel from './BBPanel'
+import CollectorPanel from './CollectorPanel'
+import VaultPanel from './VaultPanel'
+import VestingPanel from './VestingPanel'
+
+type SubTab = 'bb' | 'collector' | 'creator-vault' | 'maintenance-vault' | 'vesting'
+
+const TABS: { id: SubTab; label: string }[] = [
+  { id: 'bb',               label: '1MEMEBB'          },
+  { id: 'collector',        label: 'Collector'         },
+  { id: 'creator-vault',    label: 'Creator Vault'     },
+  { id: 'maintenance-vault',label: 'Maintenance Vault' },
+  { id: 'vesting',          label: 'Vesting'           },
+]
 
 export default function PeripheralsTab() {
   const {
-    factory,
+    oneMEMEBB,
     collector,
     creatorVault,
     maintenanceVault,
-    oneMEMEBB,
+    vestingWallet,
+    oneMEMEBBAddress,
+    collectorAddress,
     creatorVaultAddress,
     maintenanceVaultAddress,
-    collectorAddress,
-    oneMEMEBBAddress,
   } = useWeb3()
 
-  const shortAddress = (addr: string) => (addr ? `${addr.slice(0, 6)}...${addr.slice(-4)}` : '—')
+  const [active, setActive] = useState<SubTab>('bb')
 
-  interface ContractInfo {
-    name: string
-    address: string
-    isLoaded: boolean
-    description: string
+  function statusFor(id: SubTab) {
+    if (id === 'bb')                return !!oneMEMEBB
+    if (id === 'collector')         return !!collector
+    if (id === 'creator-vault')     return !!creatorVault
+    if (id === 'maintenance-vault') return !!maintenanceVault
+    if (id === 'vesting')           return !!vestingWallet
+    return false
   }
 
-  const contracts: ContractInfo[] = [
-    {
-      name: 'Factory',
-      address: factory?.target as string,
-      isLoaded: !!factory,
-      description: 'Launchpad Factory - main deployment contract',
-    },
-    {
-      name: '1MEMEBB',
-      address: oneMEMEBBAddress,
-      isLoaded: !!oneMEMEBB,
-      description: 'Buyback contract - triggers token buybacks',
-    },
-    {
-      name: 'Collector',
-      address: collectorAddress,
-      isLoaded: !!collector,
-      description: 'Revenue collector - distributes platform revenue',
-    },
-    {
-      name: 'Creator Vault',
-      address: creatorVaultAddress,
-      isLoaded: !!creatorVault,
-      description: 'Creator allocation vault - 2-of-3 multisig',
-    },
-    {
-      name: 'Maintenance Vault',
-      address: maintenanceVaultAddress,
-      isLoaded: !!maintenanceVault,
-      description: 'Maintenance fund vault - 2-of-3 multisig',
-    },
-  ]
+  function addressFor(id: SubTab) {
+    if (id === 'bb')                return oneMEMEBBAddress
+    if (id === 'collector')         return collectorAddress
+    if (id === 'creator-vault')     return creatorVaultAddress
+    if (id === 'maintenance-vault') return maintenanceVaultAddress
+    return ''
+  }
+
+  const loaded = TABS.filter(t => statusFor(t.id)).length
 
   return (
-    <div className="space-y-6">
-      {/* Peripherals Summary */}
-      <div>
-        <div className="text-sm font-bold text-text mb-4 pb-2 border-b border-border">
-          Loaded from Environment
-        </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-          {contracts.map(contract => (
-            <div
-              key={contract.name}
-              className="bg-surface border border-border rounded-lg p-3 space-y-2"
-            >
-              <div className="flex items-center justify-between">
-                <div className="font-semibold text-sm">{contract.name}</div>
-                {contract.isLoaded ? (
-                  <Badge variant="ok">✓ Loaded</Badge>
-                ) : contract.address ? (
-                  <Badge variant="warn">⚠ No ABI</Badge>
-                ) : (
-                  <Badge variant="muted">— Not set</Badge>
-                )}
-              </div>
-              <p className="text-xs text-muted">{contract.description}</p>
-              {contract.address && contract.address !== '0x0000000000000000000000000000000000000000' ? (
-                <div className="font-mono text-xs text-text bg-bg p-2 rounded break-all">
-                  {shortAddress(contract.address)}
-                </div>
-              ) : (
-                <div className="text-xs text-muted p-2">No address configured</div>
-              )}
-            </div>
+    <div className="space-y-4">
+      {/* Status bar */}
+      <div className="bg-surface border border-border rounded p-3 flex items-center justify-between text-xs">
+        <span className="text-muted">{loaded} / {TABS.length} peripherals loaded</span>
+        <div className="flex gap-2">
+          {TABS.map(t => (
+            <Badge key={t.id} variant={statusFor(t.id) ? 'ok' : 'muted'}>
+              {t.label}
+            </Badge>
           ))}
         </div>
       </div>
 
-      {/* Status Summary */}
-      <div className="bg-surface border border-border rounded-lg p-4">
-        <div className="text-sm font-bold text-text mb-3">Status</div>
-        <div className="space-y-2 text-xs">
-          <div className="flex justify-between">
-            <span className="text-muted">Contracts Loaded:</span>
-            <span className="font-semibold">{contracts.filter(c => c.isLoaded).length} / {contracts.length}</span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-muted">With Addresses:</span>
-            <span className="font-semibold">{contracts.filter(c => c.address && c.address !== '0x0000000000000000000000000000000000000000').length} / {contracts.length}</span>
-          </div>
-          <div className="mt-3 p-2 bg-bg rounded text-muted text-xs">
-            ℹ All contract addresses are loaded from environment variables (.env file). To configure different addresses, update your .env.local file.
-          </div>
-        </div>
+      {/* Sub-tab navigation */}
+      <div className="flex gap-1 border-b border-border pb-2 flex-wrap">
+        {TABS.map(t => {
+          const isLoaded = statusFor(t.id)
+          const addr = addressFor(t.id)
+          return (
+            <button
+              key={t.id}
+              onClick={() => setActive(t.id)}
+              className={[
+                'px-3 py-1.5 text-xs font-medium rounded-t transition-colors',
+                active === t.id
+                  ? 'bg-accent text-bg'
+                  : 'text-muted hover:text-text',
+              ].join(' ')}
+            >
+              {t.label}
+              {!isLoaded && addr && <span className="ml-1 text-warn">⚠</span>}
+              {!addr && <span className="ml-1 opacity-40">–</span>}
+            </button>
+          )
+        })}
+      </div>
+
+      {/* Panel content */}
+      <div>
+        {active === 'bb'                && <BBPanel />}
+        {active === 'collector'         && <CollectorPanel />}
+        {active === 'creator-vault'     && <VaultPanel contract={creatorVault} label="Creator Vault" />}
+        {active === 'maintenance-vault' && <VaultPanel contract={maintenanceVault} label="Maintenance Vault" />}
+        {active === 'vesting'           && <VestingPanel />}
       </div>
     </div>
   )

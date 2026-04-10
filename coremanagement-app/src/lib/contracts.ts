@@ -21,6 +21,7 @@ export const FACTORY_ABI = [
   'function transferOwnership(address)',
   'function acceptOwnership()',
   'function rescueBNB(address)',
+  'function rescueToken(address,address)',
   'function proposeSetPlatformFee(uint256)',
   'function executeSetPlatformFee()',
   'function proposeSetCharityFee(uint256)',
@@ -59,7 +60,14 @@ export const BC_ABI = [
 export const VW_ABI = [
   'function owner() view returns (address)',
   'function factory() view returns (address)',
+  'function VESTING_DURATION() view returns (uint256)',
+  'function schedules(address,address) view returns (uint256 total,uint256 start,uint256 claimed)',
+  'function claimable(address,address) view returns (uint256)',
+  'function claim(address)',
+  'function addVesting(address,address,uint256)',
+  'function voidSchedule(address,address)',
   'function setFactory(address)',
+  'function transferOwnership(address)',
 ] as const
 
 export const VAULT_ABI = [
