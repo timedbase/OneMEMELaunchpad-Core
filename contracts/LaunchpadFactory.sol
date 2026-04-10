@@ -5,6 +5,7 @@ import "./interfaces/IPancakeRouter02.sol";
 import "./BondingCurve.sol";
 
 interface IERC20Min {
+    function balanceOf(address account) external view returns (uint256);
     function transfer(address to, uint256 amount) external returns (bool);
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
 }
@@ -517,6 +518,14 @@ contract LaunchpadFactory {
     function rescueBNB(address to) external onlyOwner {
         if (to == address(0)) revert ZeroAddress();
         migrator.rescueBNB(to);
+        _safeSendBNB(to, address(this).balance);
+    }
+
+    function rescueToken(address token_, address to) external onlyOwner {
+        if (to == address(0)) revert ZeroAddress();
+        migrator.rescueToken(token_, to);
+        uint256 bal = IERC20Min(token_).balanceOf(address(this));
+        if (bal > 0) IERC20Min(token_).transfer(to, bal);
     }
 
     receive() external payable {}

@@ -93,6 +93,7 @@ contract BondingCurve {
     error MigrationTargetNotReached();
     error BNBTransferFailed();
     error RefundFailed();
+    error ActivePool();
     error AntibotBlocksOutOfRange();
     error DeadlineExpired();
 
@@ -301,6 +302,15 @@ contract BondingCurve {
         if (to == address(0)) revert ZeroAddress();
         if (address(this).balance <= _totalRaisedBNB) revert ZeroAmount();
         _safeSendBNB(to, address(this).balance - _totalRaisedBNB);
+    }
+
+    function rescueToken(address token_, address to) external onlyFactory {
+        if (to == address(0)) revert ZeroAddress();
+        TokenConfig storage tc = tokens[token_];
+        if (tc.token != address(0) && !tc.migrated) revert ActivePool();
+        uint256 bal = ILaunchpadToken(token_).balanceOf(address(this));
+        if (bal == 0) revert ZeroAmount();
+        ILaunchpadToken(token_).transfer(to, bal);
     }
 
     function _executeBuy(
