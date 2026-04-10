@@ -36,7 +36,7 @@ export default function CollectorPanel() {
   const [loading, setLoading] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
 
-  // setRecipients form — order matches contract: CR8, KJC, MTN, TW, HK, BB
+  // setRecipients form — order matches contract: CR8, MTN, BB, TW, HK, KJC
   const [rCR8, setRCR8] = useState('')
   const [rKJC, setRKJC] = useState('')
   const [rMTN, setRMTN] = useState('')
@@ -177,7 +177,7 @@ export default function CollectorPanel() {
               onClick={() => {
                 const addrs = [rCR8, rKJC, rMTN, rTW, rHK, rBB]
                 if (addrs.some(a => !ethers.isAddress(a))) return toast('All 6 must be valid addresses', 'danger')
-                exec(() => collector.setRecipients(rCR8, rKJC, rMTN, rTW, rHK, rBB), 'Update recipients')
+                exec(() => collector.setRecipients(rCR8, rMTN, rBB, rTW, rHK, rKJC), 'Update recipients')
               }}
               disabled={isSubmitting || state.recipientRemaining > 0}
               className="w-full"

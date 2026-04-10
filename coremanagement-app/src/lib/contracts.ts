@@ -34,6 +34,8 @@ export const FACTORY_ABI = [
   'function executeSetRouter()',
   'function predictTokenAddress(address,bytes32,address) view returns (address)',
   'function createToken((string name,string symbol,uint8 supplyOption,bool enableCreatorAlloc,bool enableAntibot,uint256 antibotBlocks,string metaURI,bytes32 salt)) payable returns (address)',
+  'function createTT((string name,string symbol,string metaURI,uint8 supplyOption,bool enableCreatorAlloc,bool enableAntibot,uint256 antibotBlocks,bytes32 salt)) payable returns (address)',
+  'function createRFL((string name,string symbol,string metaURI,uint8 supplyOption,bool enableCreatorAlloc,bool enableAntibot,uint256 antibotBlocks,bytes32 salt)) payable returns (address)',
 ] as const
 
 export const BC_ABI = [

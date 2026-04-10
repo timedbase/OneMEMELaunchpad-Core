@@ -362,7 +362,26 @@ export default function InspectorTab() {
           </button>
           {sellQuote && <p className="text-xs text-muted">{sellQuote}</p>}
           <div className="flex gap-2">
-            <button className="flex-1 bg-surface border border-border text-text rounded px-3 py-1 text-xs font-semibold hover:border-accent transition">
+            <button
+              className="flex-1 bg-surface border border-border text-text rounded px-3 py-1 text-xs font-semibold hover:border-accent transition"
+              onClick={async () => {
+                if (!signer || !bondingCurve) return toast('Connect wallet', 'warn')
+                try {
+                  const bcAddr = await bondingCurve.getAddress()
+                  const token = new ethers.Contract(
+                    inspectAddr,
+                    ['function approve(address,uint256) returns (bool)'],
+                    signer
+                  )
+                  const tx = await token.approve(bcAddr, ethers.MaxUint256)
+                  toast('Approving…', 'warn')
+                  await tx.wait()
+                  toast('Approved — you can now sell', 'ok')
+                } catch (e: any) {
+                  toast(`Approve failed: ${e.reason || e.message}`, 'danger')
+                }
+              }}
+            >
               Approve BC
             </button>
             <Button size="sm" onClick={handleDoSell} className="flex-1">

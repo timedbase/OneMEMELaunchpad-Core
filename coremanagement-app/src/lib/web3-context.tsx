@@ -4,6 +4,7 @@ import {
   useCallback,
   useState,
   useEffect,
+  useRef,
   ReactNode,
 } from 'react'
 import { BrowserProvider, Contract, ZeroAddress, JsonRpcProvider } from 'ethers'
@@ -46,7 +47,9 @@ export interface Web3ContextType {
 
   connectWallet: () => Promise<void>
   disconnectWallet: () => void
-  toast: (message: string, type: 'ok' | 'warn' | 'danger') => void
+  toast: (message: string, type?: 'ok' | 'warn' | 'danger') => void
+  toasts: { id: number; message: string; type: 'ok' | 'warn' | 'danger' }[]
+  dismissToast: (id: number) => void
 }
 
 const Web3Context = createContext<Web3ContextType | null>(null)
@@ -67,8 +70,17 @@ export function Web3Provider({ children }: { children: ReactNode }) {
   const [collector, setCollector] = useState<Contract | null>(null)
   const [oneMEMEBB, setOneMEMEBB] = useState<Contract | null>(null)
 
+  const [toasts, setToasts] = useState<{ id: number; message: string; type: 'ok' | 'warn' | 'danger' }[]>([])
+  const toastIdRef = useRef(0)
+
+  const dismissToast = useCallback((id: number) => {
+    setToasts(prev => prev.filter(t => t.id !== id))
+  }, [])
+
   const toast = useCallback((message: string, type: 'ok' | 'warn' | 'danger' = 'ok') => {
-    console.log(`[${type.toUpperCase()}] ${message}`)
+    const id = ++toastIdRef.current
+    setToasts(prev => [...prev, { id, message, type }])
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4500)
   }, [])
 
   // Attempt to switch the connected wallet to BSC Mainnet
@@ -265,6 +277,8 @@ export function Web3Provider({ children }: { children: ReactNode }) {
     connectWallet,
     disconnectWallet,
     toast,
+    toasts,
+    dismissToast,
   }
 
   return <Web3Context.Provider value={value}>{children}</Web3Context.Provider>
