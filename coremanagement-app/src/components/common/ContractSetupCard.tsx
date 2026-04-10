@@ -1,96 +1,42 @@
-import { useState } from 'react'
 import { useWeb3 } from '../../lib/web3-context'
-import { Button } from '../ui/Button'
-import { Input } from '../ui/Input'
-import { config, getRpcUrl } from '../../lib/config'
+import { config } from '../../lib/config'
+import { Badge } from '../ui/Badge'
+
+function row(label: string, addr: string) {
+  const ok = !!addr && addr !== '0x'
+  return (
+    <div key={label} className="flex items-center justify-between text-xs">
+      <span className="text-muted w-36">{label}</span>
+      {ok ? (
+        <span className="font-mono text-text truncate max-w-xs">{addr}</span>
+      ) : (
+        <Badge variant="warn">Not configured</Badge>
+      )}
+    </div>
+  )
+}
 
 export function ContractSetupCard() {
-  const { setFactoryAddress, toast, switchRPC } = useWeb3()
-  const [factoryInput, setFactoryInput] = useState('')
-  const [rpcUrl, setRpcUrl] = useState(getRpcUrl())
-  const [customRpc, setCustomRpc] = useState('')
-  const [networkType, setNetworkType] = useState<'mainnet' | 'testnet'>(config.defaultNetwork)
+  const { factory, bondingCurve } = useWeb3()
 
-  const handleLoadFactory = async () => {
-    if (!factoryInput.trim()) {
-      toast('Please enter a factory address', 'warn')
-      return
-    }
-
-    // Basic validation
-    if (!/^0x[a-fA-F0-9]{40}$/i.test(factoryInput)) {
-      toast('Invalid Ethers address format', 'danger')
-      return
-    }
-
-    try {
-      setFactoryAddress(factoryInput.trim())
-      if (customRpc) await switchRPC(customRpc)
-      else await switchRPC(rpcUrl)
-
-      toast('Factory loaded successfully', 'ok')
-    } catch (err: any) {
-      toast(`Error: ${err.message}`, 'danger')
-    }
-  }
-
-  const handleRpcSwitch = (type: 'mainnet' | 'testnet') => {
-    setNetworkType(type)
-    const url = type === 'mainnet' ? config.rpcBSCMainnet : config.rpcBSCTestnet
-    setRpcUrl(url)
-    switchRPC(url)
-  }
+  const allLoaded = !!factory && !!bondingCurve
 
   return (
-    <div className="bg-surface border border-border rounded-lg p-4 mb-6">
-      <h3 className="text-sm font-semibold text-text mb-4">Setup</h3>
-
-      <div className="space-y-4">
-        {/* RPC Selection */}
-        <div>
-          <label className="text-xs text-muted font-medium mb-2 block">Network</label>
-          <div className="flex gap-2">
-            <Button
-              variant={networkType === 'testnet' ? 'default' : 'secondary'}
-              size="sm"
-              onClick={() => handleRpcSwitch('testnet')}
-            >
-              BSC Testnet
-            </Button>
-            <Button
-              variant={networkType === 'mainnet' ? 'default' : 'secondary'}
-              size="sm"
-              onClick={() => handleRpcSwitch('mainnet')}
-            >
-              BSC Mainnet
-            </Button>
-          </div>
-        </div>
-
-        {/* Custom RPC */}
-        <div>
-          <Input
-            label="Custom RPC (optional)"
-            placeholder="https://..."
-            value={customRpc}
-            onChange={(e) => setCustomRpc(e.target.value)}
-          />
-        </div>
-
-        {/* Factory Address */}
-        <div>
-          <Input
-            label="LaunchpadFactory Address"
-            placeholder="0x..."
-            className="mono"
-            value={factoryInput}
-            onChange={(e) => setFactoryInput(e.target.value)}
-          />
-        </div>
-
-        <Button onClick={handleLoadFactory} className="w-full">
-          Load Factory
-        </Button>
+    <div className="bg-surface border border-border rounded-lg p-4 mb-6 space-y-3">
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-text">Contract Configuration</h3>
+        {allLoaded
+          ? <Badge variant="ok">Loaded from env</Badge>
+          : <Badge variant="warn">Check .env.local</Badge>}
+      </div>
+      <div className="space-y-1.5">
+        {row('Factory',           config.factoryAddress)}
+        {row('Bonding Curve',     config.bondingCurveAddress)}
+        {row('Vesting Wallet',    config.vestingWalletAddress)}
+        {row('1MEMEBB',           config.oneMEMEBBAddress)}
+        {row('Collector',         config.collectorAddress)}
+        {row('Creator Vault',     config.creatorVaultAddress)}
+        {row('Maintenance Vault', config.maintenanceVaultAddress)}
       </div>
     </div>
   )

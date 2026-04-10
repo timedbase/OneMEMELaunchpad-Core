@@ -138,7 +138,7 @@ export default function OverviewTab() {
 
       {!factory || !bondingCurve ? (
         <div className="bg-surface border border-border rounded-lg p-8 text-center text-muted">
-          Load a factory address to begin
+          Connecting to BSC Mainnet…
         </div>
       ) : (
         <>

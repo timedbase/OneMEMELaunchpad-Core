@@ -38,6 +38,7 @@ interface VaultPanelProps {
 
 export default function VaultPanel({ contract, label }: VaultPanelProps) {
   const { account, toast } = useWeb3()
+
   const [vaultState, setVaultState] = useState<VaultState | null>(null)
   const [proposals, setProposals] = useState<Proposal[]>([])
   const [loading, setLoading] = useState(false)
@@ -116,7 +117,18 @@ export default function VaultPanel({ contract, label }: VaultPanelProps) {
     exec(() => contract.propose(propTo, value, data), 'Propose')
   }
 
-  if (!contract) return <div className="text-muted text-sm p-4">{label} address not configured.</div>
+  if (!contract) return (
+    <div className="bg-surface border border-border rounded p-4 space-y-3">
+      <div className="font-semibold text-sm">{label}</div>
+      <p className="text-xs text-muted">
+        Address not configured. Set{' '}
+        <span className="font-mono">
+          {label === 'Creator Vault' ? 'VITE_CREATOR_VAULT_ADDRESS' : 'VITE_MAINTENANCE_VAULT_ADDRESS'}
+        </span>{' '}
+        in <span className="font-mono">.env.local</span> and restart the dev server.
+      </p>
+    </div>
+  )
   if (loading && !vaultState) return <div className="text-muted text-sm p-4">Loading…</div>
   if (!vaultState) return null
 
