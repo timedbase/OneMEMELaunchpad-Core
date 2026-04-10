@@ -94,6 +94,7 @@ contract BondingCurve {
     error BNBTransferFailed();
     error RefundFailed();
     error ActivePool();
+    error TransferFailed();
     error AntibotBlocksOutOfRange();
     error DeadlineExpired();
 
@@ -130,6 +131,8 @@ contract BondingCurve {
     event FeeRecipientUpdated(address recipient);
     event CharityWalletUpdated(address wallet);
     event FactoryUpdated(address indexed oldFactory, address indexed newFactory);
+    event BNBRescued(address indexed to, uint256 amount);
+    event TokenRescued(address indexed token, address indexed to, uint256 amount);
 
     modifier onlyFactory() {
         if (msg.sender != factory) revert NotFactory();
@@ -298,19 +301,23 @@ contract BondingCurve {
         factory = factory_;
     }
 
-    function rescueBNB(address to) external onlyFactory {
+    function rescueBNB(address to) external onlyFactory nonReentrant {
         if (to == address(0)) revert ZeroAddress();
         if (address(this).balance <= _totalRaisedBNB) revert ZeroAmount();
-        _safeSendBNB(to, address(this).balance - _totalRaisedBNB);
+        uint256 amount = address(this).balance - _totalRaisedBNB;
+        _safeSendBNB(to, amount);
+        emit BNBRescued(to, amount);
     }
 
-    function rescueToken(address token_, address to) external onlyFactory {
+    function rescueToken(address token_, address to) external onlyFactory nonReentrant {
+        if (token_ == address(0)) revert ZeroAddress();
         if (to == address(0)) revert ZeroAddress();
         TokenConfig storage tc = tokens[token_];
         if (tc.token != address(0) && !tc.migrated) revert ActivePool();
         uint256 bal = ILaunchpadToken(token_).balanceOf(address(this));
         if (bal == 0) revert ZeroAmount();
-        ILaunchpadToken(token_).transfer(to, bal);
+        if (!ILaunchpadToken(token_).transfer(to, bal)) revert TransferFailed();
+        emit TokenRescued(token_, to, bal);
     }
 
     function _executeBuy(

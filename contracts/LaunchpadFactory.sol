@@ -132,6 +132,7 @@ contract LaunchpadFactory {
     error TimelockNotQueued();
     error TimelockNotExpired();
     error ParamOutOfRange();
+    error TransferFailed();
 
     event TokenCreated(
         address indexed token,
@@ -157,6 +158,8 @@ contract LaunchpadFactory {
     event TimelockQueued(bytes32 indexed actionId, uint256 executeAfter);
     event TimelockExecuted(bytes32 indexed actionId);
     event TimelockCancelled(bytes32 indexed actionId);
+    event BNBRescued(address indexed to, uint256 amount);
+    event TokenRescued(address indexed token, address indexed to, uint256 amount);
 
     modifier onlyOwner() { if (msg.sender != owner) revert NotOwner(); _; }
     modifier onlyOwnerOrManager() {
@@ -515,17 +518,23 @@ contract LaunchpadFactory {
         return (10, 199);
     }
 
-    function rescueBNB(address to) external onlyOwner {
+    function rescueBNB(address to) external onlyOwner nonReentrant {
         if (to == address(0)) revert ZeroAddress();
+        uint256 factoryBal = address(this).balance;
         migrator.rescueBNB(to);
-        _safeSendBNB(to, address(this).balance);
+        _safeSendBNB(to, factoryBal);
+        emit BNBRescued(to, factoryBal);
     }
 
-    function rescueToken(address token_, address to) external onlyOwner {
+    function rescueToken(address token_, address to) external onlyOwner nonReentrant {
+        if (token_ == address(0)) revert ZeroAddress();
         if (to == address(0)) revert ZeroAddress();
-        migrator.rescueToken(token_, to);
+        try migrator.rescueToken(token_, to) {} catch {}
         uint256 bal = IERC20Min(token_).balanceOf(address(this));
-        if (bal > 0) IERC20Min(token_).transfer(to, bal);
+        if (bal > 0) {
+            if (!IERC20Min(token_).transfer(to, bal)) revert TransferFailed();
+        }
+        emit TokenRescued(token_, to, bal);
     }
 
     receive() external payable {}
