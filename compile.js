@@ -32,6 +32,13 @@ const CONTRACT_FILES = [
   'contracts/tokens/StandardToken.sol',
   'contracts/tokens/TaxToken.sol',
   'contracts/tokens/ReflectionToken.sol',
+  // ── AggregatorRouter ──────────────────────────────────────────────────────
+  'AggregatorRouter/interfaces/IAdapter.sol',
+  'AggregatorRouter/OneMEMEAggregator.sol',
+  'AggregatorRouter/adapters/BaseAdapter.sol',
+  'AggregatorRouter/adapters/GenericV2Adapter.sol',
+  'AggregatorRouter/adapters/GenericV3Adapter.sol',
+  'AggregatorRouter/adapters/OneMEMEAdapter.sol',
 ];
 
 // ── Build source map ─────────────────────────────────────────────────────────
