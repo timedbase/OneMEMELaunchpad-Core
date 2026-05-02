@@ -3,8 +3,6 @@ pragma solidity ^0.8.32;
 
 import "./BaseAdapter.sol";
 
-// ─── Interfaces ───────────────────────────────────────────────────────────────
-
 interface ITokenManagerHelper3 {
     function getTokenInfo(address token) external view returns (
         uint256 version,
@@ -35,8 +33,6 @@ interface ITokenManagerV2 {
     function buyToken(bytes calldata args, uint256 time, bytes calldata signature) external payable;
     function sellToken(uint256 origin, address token, uint256 amount, uint256 minFunds, uint256 feeRate, address feeRecipient) external;
 }
-
-// ─── Main Contract ────────────────────────────────────────────────────────────
 
 /**
  * @title  FourMEMEAdapter

@@ -6,13 +6,12 @@ import "./interfaces/IAdapter.sol";
 /**
  * @title  OneMEMEAggregator
  * @notice Platform-agnostic swap aggregator. Executes trades through a registry of pluggable
- *         adapters. 1% fee is deducted from gross input before the swap (always in the input asset).
- *         All routing is done offchain; the aggregator is a pure executor.
+ *         adapters. All routing is done offchain; the aggregator is a pure executor.
  *         tokenIn/tokenOut == address(0) denotes native BNB.
  */
 contract OneMEMEAggregator {
 
-    uint256 private constant FEE_BPS   = 100;
+    uint256 private constant FEE_BPS   = 50;
     uint256 private constant BPS_DENOM = 10_000;
 
     uint256 private constant _NOT_ENTERED = 1;
@@ -28,8 +27,6 @@ contract OneMEMEAggregator {
         string  name;
     }
 
-    /// @dev id → adapter. id is an arbitrary bytes32 chosen by the owner,
-    ///      e.g. keccak256("PANCAKE_V2") or keccak256("CUSTOM_PLATFORM").
     mapping(bytes32 => AdapterEntry) public adapters;
 
     bytes32[] private _adapterIds;
@@ -86,17 +83,6 @@ contract OneMEMEAggregator {
 
     receive() external payable {}
 
-    /**
-     * @notice Execute a swap through a registered adapter.
-     * @param adapterId   Registry key — e.g. keccak256(abi.encodePacked("PANCAKE_V2")).
-     * @param tokenIn     Input token; address(0) = native BNB (attach as msg.value).
-     * @param amountIn    Gross input amount (ignored when tokenIn == address(0)).
-     * @param tokenOut    Output token; address(0) = native BNB output.
-     * @param minOut      Minimum acceptable output; forwarded to adapter → DEX.
-     * @param to          Recipient of output tokens or BNB.
-     * @param deadline    Unix timestamp; provides time-based slippage protection.
-     * @param adapterData Adapter-specific encoded routing params (offchain-built).
-     */
     function swap(
         bytes32        adapterId,
         address        tokenIn,
@@ -217,10 +203,12 @@ contract OneMEMEAggregator {
     }
 
     function rescueTokens(address token, address recipient, uint256 amount) external onlyOwner {
+        if (recipient == address(0)) revert ZeroAddress();
         _safeTransfer(token, recipient, amount);
     }
 
     function rescueNative(address recipient, uint256 amount) external onlyOwner {
+        if (recipient == address(0)) revert ZeroAddress();
         _sendNative(recipient, amount);
     }
 

@@ -8,8 +8,6 @@ pragma solidity ^0.8.32;
  *         Supports Token→BNB (relayerFee ≥ 0) and Token→Token (relayerFee must be 0).
  */
 
-// ─── Interfaces ───────────────────────────────────────────────────────────────
-
 interface IOneMEMEAggregator {
     function swap(
         bytes32        adapterId,
@@ -43,8 +41,6 @@ interface IPermit2 {
         bytes                    calldata signature
     ) external;
 }
-
-// ─── Main Contract ────────────────────────────────────────────────────────────
 
 contract OneMEMEMetaTx {
 
