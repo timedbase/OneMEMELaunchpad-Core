@@ -10,6 +10,7 @@ const tabs = [
   { id: 'inspector', label: 'Inspector' },
   { id: 'admin', label: 'Admin' },
   { id: 'peripherals', label: 'Peripherals' },
+  { id: 'aggregator', label: 'Aggregator' },
 ]
 
 export default function TabNavigation({ activeTab, onTabChange }: TabNavigationProps) {

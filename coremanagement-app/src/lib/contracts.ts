@@ -127,6 +127,25 @@ export const ONE_MEMEBB_ABI = [
   'function acceptOwnership()',
 ] as const
 
+export const AGGREGATOR_ABI = [
+  'function owner() view returns (address)',
+  'function pendingOwner() view returns (address)',
+  'function feeRecipient() view returns (address)',
+  'function adapters(bytes32) view returns (address addr, bool enabled, string name)',
+  'function adapterCount() view returns (uint256)',
+  'function adapterAt(uint256) view returns (bytes32 id, address addr, bool enabled, string adapterName)',
+  'function allAdapterIds() view returns (bytes32[])',
+  'function registerAdapter(bytes32,address,bool)',
+  'function enableAdapter(bytes32)',
+  'function disableAdapter(bytes32)',
+  'function upgradeAdapter(bytes32,address)',
+  'function setFeeRecipient(address)',
+  'function transferOwnership(address)',
+  'function acceptOwnership()',
+  'function rescueTokens(address,address,uint256)',
+  'function rescueNative(address,uint256)',
+] as const
+
 export const ERC20_ABI = [
   'function name() view returns (string)',
   'function symbol() view returns (string)',

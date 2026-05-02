@@ -16,6 +16,7 @@ import {
   VAULT_ABI,
   COLLECTOR_ABI,
   ONE_MEMEBB_ABI,
+  AGGREGATOR_ABI,
 } from './contracts'
 
 const BSC_MAINNET_CHAIN_ID = 56
@@ -39,11 +40,13 @@ export interface Web3ContextType {
   maintenanceVault: Contract | null
   collector: Contract | null
   oneMEMEBB: Contract | null
+  aggregator: Contract | null
 
   creatorVaultAddress: string
   maintenanceVaultAddress: string
   oneMEMEBBAddress: string
   collectorAddress: string
+  aggregatorAddress: string
 
   connectWallet: () => Promise<void>
   disconnectWallet: () => void
@@ -69,6 +72,7 @@ export function Web3Provider({ children }: { children: ReactNode }) {
   const [maintenanceVault, setMaintenanceVault] = useState<Contract | null>(null)
   const [collector, setCollector] = useState<Contract | null>(null)
   const [oneMEMEBB, setOneMEMEBB] = useState<Contract | null>(null)
+  const [aggregator, setAggregator] = useState<Contract | null>(null)
 
   const [toasts, setToasts] = useState<{ id: number; message: string; type: 'ok' | 'warn' | 'danger' }[]>([])
   const toastIdRef = useRef(0)
@@ -218,6 +222,11 @@ export function Web3Provider({ children }: { children: ReactNode }) {
         try { setOneMEMEBB(new Contract(addresses.oneMEMEBB, ONE_MEMEBB_ABI, p)) }
         catch (err) { console.warn('1MEMEBB init failed:', err) }
       }
+
+      if (addresses.aggregator) {
+        try { setAggregator(new Contract(addresses.aggregator, AGGREGATOR_ABI, p)) }
+        catch (err) { console.warn('Aggregator init failed:', err) }
+      }
     }
 
     initContracts()
@@ -270,10 +279,12 @@ export function Web3Provider({ children }: { children: ReactNode }) {
     maintenanceVault,
     collector,
     oneMEMEBB,
+    aggregator,
     creatorVaultAddress: addresses.creatorVault,
     maintenanceVaultAddress: addresses.maintenanceVault,
     collectorAddress: addresses.collector,
     oneMEMEBBAddress: addresses.oneMEMEBB,
+    aggregatorAddress: addresses.aggregator,
     connectWallet,
     disconnectWallet,
     toast,

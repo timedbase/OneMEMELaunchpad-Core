@@ -8,6 +8,7 @@ import RegistryTab from './components/registry/RegistryTab'
 import InspectorTab from './components/inspector/InspectorTab'
 import AdminTab from './components/admin/AdminTab'
 import PeripheralsTab from './components/peripherals/PeripheralsTab'
+import AggregatorTab from './components/aggregator/AggregatorTab'
 import './App.css'
 
 const TYPE_STYLES: Record<string, string> = {
@@ -51,6 +52,7 @@ function AppContent() {
         {activeTab === 'inspector' && <InspectorTab />}
         {activeTab === 'admin' && <AdminTab />}
         {activeTab === 'peripherals' && <PeripheralsTab />}
+        {activeTab === 'aggregator'  && <AggregatorTab />}
       </div>
 
       <ToastContainer />
