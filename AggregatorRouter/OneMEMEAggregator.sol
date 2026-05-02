@@ -185,25 +185,43 @@ contract OneMEMEAggregator {
 
         } else {
             // ── ERC-20 input ─────────────────────────────────────────────────
-            // Measure what was actually received rather than trusting the declared
-            // amountIn. This handles fee-on-transfer tokens correctly: the 1% fee
-            // and the net forwarded to the adapter are both computed on real balance.
-            uint256 balBefore = _balanceOf(tokenIn, address(this));
-            _pullToken(tokenIn, msg.sender, address(this), amountIn);
-            uint256 received = _balanceOf(tokenIn, address(this)) - balBefore;
-
-            (uint256 fee, uint256 netIn) = _splitFee(received);
-            _safeTransfer(tokenIn, feeRecipient, fee);
-
-            // Transfer net tokens directly to the adapter — it owns them on entry to execute()
-            _safeTransfer(tokenIn, adapterAddr, netIn);
-
-            amountOut = IAdapter(adapterAddr).execute(
-                tokenIn, netIn, tokenOut, minOut, to, adapterData
+            // Delegated to an internal function to keep the stack depth of this
+            // frame below the 16-slot EVM limit when compiled without --via-ir.
+            uint256 fee;
+            (amountOut, fee) = _swapERC20(
+                adapterAddr, tokenIn, amountIn, tokenOut, minOut, to, adapterData
             );
             // Event uses the user-declared amountIn for gross display; fee reflects reality.
             emit Swapped(msg.sender, adapterId, tokenIn, tokenOut, amountIn, fee, amountOut);
         }
+    }
+
+    /// @dev ERC-20 swap path extracted to its own stack frame to prevent
+    ///      "stack too deep" under legacy (non-IR) codegen.
+    function _swapERC20(
+        address        adapterAddr,
+        address        tokenIn,
+        uint256        amountIn,
+        address        tokenOut,
+        uint256        minOut,
+        address        to,
+        bytes calldata adapterData
+    ) internal returns (uint256 amountOut, uint256 fee) {
+        // Measure actual received — handles fee-on-transfer tokens correctly.
+        uint256 balBefore = _balanceOf(tokenIn, address(this));
+        _pullToken(tokenIn, msg.sender, address(this), amountIn);
+        uint256 received = _balanceOf(tokenIn, address(this)) - balBefore;
+
+        uint256 netIn;
+        (fee, netIn) = _splitFee(received);
+        _safeTransfer(tokenIn, feeRecipient, fee);
+
+        // Transfer net tokens directly to the adapter — it owns them on entry to execute().
+        _safeTransfer(tokenIn, adapterAddr, netIn);
+
+        amountOut = IAdapter(adapterAddr).execute(
+            tokenIn, netIn, tokenOut, minOut, to, adapterData
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────
