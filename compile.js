@@ -44,6 +44,7 @@ const CONTRACT_FILES = [
   'AggregatorRouter/adapters/PancakeSwapAdapter.sol',
   'AggregatorRouter/adapters/UniswapAdapter.sol',
   'AggregatorRouter/adapters/FlapSHAdapter.sol',
+  'AggregatorRouter/OneMEMEMetaTx.sol',
 ];
 
 // ── Build source map ─────────────────────────────────────────────────────────
