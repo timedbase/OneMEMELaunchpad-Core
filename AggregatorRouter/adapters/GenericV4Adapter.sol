@@ -65,39 +65,82 @@ contract GenericV4Adapter is BaseAdapter {
         address        to,
         bytes calldata adapterData
     ) external payable override onlyAggregator returns (uint256 amountOut) {
+        uint256 actualIn = tokenIn == address(0) ? netIn : _selfBalance(tokenIn);
+        if (!abi.decode(adapterData, (bool)))
+            amountOut = _execSingle(tokenIn, actualIn, tokenOut, minOut, to, adapterData);
+        else
+            amountOut = _execMulti(tokenIn, actualIn, tokenOut, minOut, to, adapterData);
+    }
 
-        bool isMultiHop = abi.decode(adapterData, (bool));
+    function _execSingle(
+        address        tokenIn,
+        uint256        actualIn,
+        address        tokenOut,
+        uint256        minOut,
+        address        to,
+        bytes calldata adapterData
+    ) internal returns (uint256) {
+        (bytes memory actions, bytes[] memory aParams, uint256 deadline) =
+            _prepSingle(tokenIn, tokenOut, actualIn, minOut, adapterData);
+        return _fireRouter(tokenIn, tokenOut, minOut, to, actualIn, actions, aParams, deadline);
+    }
 
-        uint256 actualIn;
-        bytes memory actions;
-        bytes[] memory aParams;
-        uint256 deadline;
+    function _execMulti(
+        address        tokenIn,
+        uint256        actualIn,
+        address        tokenOut,
+        uint256        minOut,
+        address        to,
+        bytes calldata adapterData
+    ) internal returns (uint256) {
+        (bytes memory actions, bytes[] memory aParams, uint256 deadline) =
+            _prepMulti(tokenIn, tokenOut, actualIn, minOut, adapterData);
+        return _fireRouter(tokenIn, tokenOut, minOut, to, actualIn, actions, aParams, deadline);
+    }
 
-        if (!isMultiHop) {
-            (, PoolKey memory poolKey, bool zeroForOne, bytes memory hookData, uint256 dl) =
-                abi.decode(adapterData, (bool, PoolKey, bool, bytes, uint256));
-            deadline = dl;
-            actualIn = tokenIn == address(0) ? netIn : _selfBalance(tokenIn);
-            (actions, aParams) = _buildSingle(tokenIn, tokenOut, poolKey, zeroForOne, actualIn, minOut, hookData);
-        } else {
-            (, PathKey[] memory path, uint256 dl) = abi.decode(adapterData, (bool, PathKey[], uint256));
-            if (path.length == 0) revert InvalidPath();
-            deadline = dl;
-            actualIn = tokenIn == address(0) ? netIn : _selfBalance(tokenIn);
-            (actions, aParams) = _buildMulti(tokenIn, tokenOut, path, actualIn, minOut);
-        }
+    function _prepSingle(
+        address        tokenIn,
+        address        tokenOut,
+        uint256        actualIn,
+        uint256        minOut,
+        bytes calldata data
+    ) internal view returns (bytes memory actions, bytes[] memory aParams, uint256 deadline) {
+        (, PoolKey memory poolKey, bool zeroForOne, bytes memory hookData, uint256 dl) =
+            abi.decode(data, (bool, PoolKey, bool, bytes, uint256));
+        deadline = dl;
+        (actions, aParams) = _buildSingle(tokenIn, tokenOut, poolKey, zeroForOne, actualIn, minOut, hookData);
+    }
 
-        if (tokenIn != address(0)) {
-            _safeTransfer(tokenIn, universalRouter, actualIn);
-        }
+    function _prepMulti(
+        address        tokenIn,
+        address        tokenOut,
+        uint256        actualIn,
+        uint256        minOut,
+        bytes calldata data
+    ) internal view returns (bytes memory actions, bytes[] memory aParams, uint256 deadline) {
+        (, PathKey[] memory path, uint256 dl) = abi.decode(data, (bool, PathKey[], uint256));
+        if (path.length == 0) revert InvalidPath();
+        deadline = dl;
+        (actions, aParams) = _buildMulti(tokenIn, tokenOut, path, actualIn, minOut);
+    }
 
+    function _fireRouter(
+        address        tokenIn,
+        address        tokenOut,
+        uint256        minOut,
+        address        to,
+        uint256        actualIn,
+        bytes memory   actions,
+        bytes[] memory aParams,
+        uint256        deadline
+    ) internal returns (uint256 amountOut) {
+        if (tokenIn != address(0)) _safeTransfer(tokenIn, universalRouter, actualIn);
         uint256 snapBefore = tokenOut == address(0) ? address(this).balance : _selfBalance(tokenOut);
-
-        bytes memory commands = abi.encodePacked(CMD_V4_SWAP);
         bytes[] memory inputs = new bytes[](1);
         inputs[0] = abi.encode(actions, aParams);
-        IUniversalRouterV4(universalRouter).execute{value: msg.value}(commands, inputs, deadline);
-
+        IUniversalRouterV4(universalRouter).execute{value: msg.value}(
+            abi.encodePacked(CMD_V4_SWAP), inputs, deadline
+        );
         if (tokenOut == address(0)) {
             amountOut = address(this).balance - snapBefore;
             if (amountOut < minOut) revert InsufficientOutput();
