@@ -157,6 +157,8 @@ export const METATX_ABI = [
   'function PERMIT_NONE() view returns (uint8)',
   'function PERMIT_EIP2612() view returns (uint8)',
   'function PERMIT_2() view returns (uint8)',
+  'function executeMetaTx((address user, uint256 nonce, uint256 deadline, bytes32 adapterId, address tokenIn, uint256 grossAmountIn, address tokenOut, uint256 minUserOut, address recipient, uint256 swapDeadline, bytes adapterData, uint256 relayerFee) order, bytes sig, (uint8 permitType, bytes data) permit)',
+  'function orderDigest((address user, uint256 nonce, uint256 deadline, bytes32 adapterId, address tokenIn, uint256 grossAmountIn, address tokenOut, uint256 minUserOut, address recipient, uint256 swapDeadline, bytes adapterData, uint256 relayerFee) order) view returns (bytes32)',
   'function invalidateNonces(uint256)',
   'function rescueTokens(address,address,uint256)',
   'function rescueNative(address,uint256)',
