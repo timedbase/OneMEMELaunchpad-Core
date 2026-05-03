@@ -13,7 +13,7 @@ const variantStyles: Record<string, string> = {
 
 export function Badge({ variant = 'muted', children }: BadgeProps) {
   return (
-    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${variantStyles[variant]}`}>
+    <span className={`inline-flex items-center px-1.5 py-0.5 rounded-full text-[11px] font-medium ${variantStyles[variant]}`}>
       {children}
     </span>
   )
