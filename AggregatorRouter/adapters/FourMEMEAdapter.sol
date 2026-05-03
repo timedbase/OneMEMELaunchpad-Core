@@ -79,23 +79,43 @@ contract FourMEMEAdapter is BaseAdapter {
         bytes calldata adapterData
     ) external payable override onlyAggregator returns (uint256 amountOut) {
         address token = abi.decode(adapterData, (address));
-
-        (
-            uint256 version,
-            address tokenManager,
-            address quote,
-            ,,,,,,,, // lastPrice … maxFunds (unused)
-            bool liquidityAdded
-        ) = ITokenManagerHelper3(HELPER_V3).getTokenInfo(token);
-
-        if (liquidityAdded) revert TokenMigrated();
-
         if (tokenIn == address(0) && tokenOut != address(0)) {
-            _buy(version, tokenManager, quote, token, netIn, minOut, to);
+            _executeBuy(token, netIn, minOut, to);
         } else if (tokenIn != address(0) && tokenOut == address(0)) {
-            amountOut = _sell(version, tokenManager, quote, token, minOut, to);
+            amountOut = _executeSell(token, minOut, to);
         } else {
             revert UnsupportedDirection();
+        }
+    }
+
+    function _executeBuy(address token, uint256 netIn, uint256 minOut, address to) internal {
+        (uint256 version, address tokenManager, address quote, bool liquidityAdded) = _tokenInfo(token);
+        if (liquidityAdded) revert TokenMigrated();
+        _buy(version, tokenManager, quote, token, netIn, minOut, to);
+    }
+
+    function _executeSell(address token, uint256 minOut, address to) internal returns (uint256) {
+        (uint256 version, address tokenManager, address quote, bool liquidityAdded) = _tokenInfo(token);
+        if (liquidityAdded) revert TokenMigrated();
+        return _sell(version, tokenManager, quote, token, minOut, to);
+    }
+
+    // getTokenInfo returns 12 static fields; decoding all 12 via the ABI decoder pushes too many
+    // slots onto the legacy stack. Read the 4 needed fields directly from raw return bytes instead.
+    function _tokenInfo(address token) private view returns (
+        uint256 version, address tokenManager, address quote, bool liquidityAdded
+    ) {
+        (bool ok, bytes memory d) = HELPER_V3.staticcall(
+            abi.encodeWithSelector(ITokenManagerHelper3.getTokenInfo.selector, token)
+        );
+        if (!ok) revert();
+        // Each field is 32 bytes; `d` has a 32-byte length prefix before the ABI data.
+        // liquidityAdded is the 12th field (index 11): offset = 0x20 + 11*0x20 = 0x180.
+        assembly {
+            version        := mload(add(d, 0x20))
+            tokenManager   := mload(add(d, 0x40))
+            quote          := mload(add(d, 0x60))
+            liquidityAdded := mload(add(d, 0x180))
         }
     }
 
