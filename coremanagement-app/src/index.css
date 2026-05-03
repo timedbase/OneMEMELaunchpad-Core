@@ -1,3 +1,5 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -9,33 +11,45 @@
 }
 
 :root {
-  --bg: #0d0d0f;
-  --surface: #141417;
-  --border: #242428;
-  --accent: #f0b90b;
-  --accent-2: #e8a800;
-  --danger: #e05252;
-  --ok: #42b883;
-  --warn: #f0a30b;
-  --text: #e8e8ed;
-  --muted: #7a7a8a;
-  --radius: 10px;
-  --gap: 16px;
+  --bg:       #07080F;
+  --surface:  #0F1421;
+  --border:   #1C2538;
+  --accent:   #6366F1;
+  --accent-2: #4F46E5;
+  --danger:   #F43F5E;
+  --ok:       #10B981;
+  --warn:     #F59E0B;
+  --text:     #E8EDF8;
+  --muted:    #64748B;
+}
+
+html, body, #root {
+  height: 100%;
 }
 
 body {
-  font-family: system-ui, -apple-system, sans-serif;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
   background: var(--bg);
   color: var(--text);
-  min-height: 100vh;
   font-size: 14px;
   line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
-.shell {
-  max-width: 1160px;
-  margin: 0 auto;
-  padding: 0 var(--gap) 60px;
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 99px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
 }
 
 @layer components {
