@@ -146,6 +146,24 @@ export const AGGREGATOR_ABI = [
   'function rescueNative(address,uint256)',
 ] as const
 
+export const METATX_ABI = [
+  'function aggregator() view returns (address)',
+  'function permit2() view returns (address)',
+  'function owner() view returns (address)',
+  'function pendingOwner() view returns (address)',
+  'function nonces(address) view returns (uint256)',
+  'function ORDER_TYPEHASH() view returns (bytes32)',
+  'function DOMAIN_SEPARATOR() view returns (bytes32)',
+  'function PERMIT_NONE() view returns (uint8)',
+  'function PERMIT_EIP2612() view returns (uint8)',
+  'function PERMIT_2() view returns (uint8)',
+  'function invalidateNonces(uint256)',
+  'function rescueTokens(address,address,uint256)',
+  'function rescueNative(address,uint256)',
+  'function transferOwnership(address)',
+  'function acceptOwnership()',
+] as const
+
 export const ERC20_ABI = [
   'function name() view returns (string)',
   'function symbol() view returns (string)',

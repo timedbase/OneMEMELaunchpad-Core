@@ -9,6 +9,7 @@ import InspectorTab from './components/inspector/InspectorTab'
 import AdminTab from './components/admin/AdminTab'
 import PeripheralsTab from './components/peripherals/PeripheralsTab'
 import AggregatorTab from './components/aggregator/AggregatorTab'
+import MetaTxTab from './components/metatx/MetaTxTab'
 import './App.css'
 
 const TYPE_STYLES: Record<string, string> = {
@@ -53,6 +54,7 @@ function AppContent() {
         {activeTab === 'admin' && <AdminTab />}
         {activeTab === 'peripherals' && <PeripheralsTab />}
         {activeTab === 'aggregator'  && <AggregatorTab />}
+        {activeTab === 'metatx'      && <MetaTxTab />}
       </div>
 
       <ToastContainer />

@@ -190,16 +190,7 @@ contract OneMEMEMetaTx {
         uint256 aggregatorMinOut = order.minUserOut + order.relayerFee;
         uint256 bnbBefore = address(this).balance;
 
-        uint256 amountOut = IOneMEMEAggregator(aggregator).swap(
-            order.adapterId,
-            order.tokenIn,
-            actualReceived,
-            order.tokenOut,
-            aggregatorMinOut,
-            swapRecipient,
-            order.swapDeadline,
-            order.adapterData
-        );
+        uint256 amountOut = _callSwap(order, actualReceived, swapRecipient, aggregatorMinOut);
 
         _resetApproval(order.tokenIn, aggregator);
 
@@ -211,12 +202,7 @@ contract OneMEMEMetaTx {
             if (userBNB > 0) _sendNative(order.recipient, userBNB);
         }
 
-        emit MetaTxExecuted(
-            order.user, msg.sender, order.adapterId,
-            order.tokenIn, order.tokenOut,
-            order.grossAmountIn, amountOut,
-            order.relayerFee, usedNonce
-        );
+        _emitExecuted(order, amountOut, usedNonce);
     }
 
     function invalidateNonces(uint256 newNonce) external {
@@ -251,6 +237,37 @@ contract OneMEMEMetaTx {
     /// @notice Compute the EIP-712 digest for an order (use with eth_signTypedData_v4 offchain).
     function orderDigest(MetaTxOrder calldata order) external view returns (bytes32) {
         return keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, _structHash(order)));
+    }
+
+    function _emitExecuted(
+        MetaTxOrder calldata order,
+        uint256 amountOut,
+        uint256 usedNonce
+    ) internal {
+        emit MetaTxExecuted(
+            order.user, msg.sender, order.adapterId,
+            order.tokenIn, order.tokenOut,
+            order.grossAmountIn, amountOut,
+            order.relayerFee, usedNonce
+        );
+    }
+
+    function _callSwap(
+        MetaTxOrder calldata order,
+        uint256 actualReceived,
+        address swapRecipient,
+        uint256 aggregatorMinOut
+    ) internal returns (uint256) {
+        return IOneMEMEAggregator(aggregator).swap(
+            order.adapterId,
+            order.tokenIn,
+            actualReceived,
+            order.tokenOut,
+            aggregatorMinOut,
+            swapRecipient,
+            order.swapDeadline,
+            order.adapterData
+        );
     }
 
     function _pullWithPermit(
@@ -307,14 +324,21 @@ contract OneMEMEMetaTx {
     }
 
     function _structHash(MetaTxOrder calldata order) internal pure returns (bytes32) {
-        return keccak256(abi.encode(
-            ORDER_TYPEHASH,
-            order.user, order.nonce, order.deadline,
-            order.adapterId, order.tokenIn, order.grossAmountIn,
-            order.tokenOut, order.minUserOut, order.recipient,
-            order.swapDeadline,
-            keccak256(order.adapterData),
-            order.relayerFee
+        // Split across two abi.encode calls to stay within the 16-slot legacy stack limit.
+        // Concatenation is safe: all fields are static-length (32 bytes each after padding),
+        // so bytes.concat(abi.encode(a…g), abi.encode(h…m)) == abi.encode(a…m).
+        return keccak256(bytes.concat(
+            abi.encode(
+                ORDER_TYPEHASH,
+                order.user, order.nonce, order.deadline,
+                order.adapterId, order.tokenIn, order.grossAmountIn
+            ),
+            abi.encode(
+                order.tokenOut, order.minUserOut, order.recipient,
+                order.swapDeadline,
+                keccak256(order.adapterData),
+                order.relayerFee
+            )
         ));
     }
 

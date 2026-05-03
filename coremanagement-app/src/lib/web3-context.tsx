@@ -17,6 +17,7 @@ import {
   COLLECTOR_ABI,
   ONE_MEMEBB_ABI,
   AGGREGATOR_ABI,
+  METATX_ABI,
 } from './contracts'
 
 const BSC_MAINNET_CHAIN_ID = 56
@@ -41,12 +42,14 @@ export interface Web3ContextType {
   collector: Contract | null
   oneMEMEBB: Contract | null
   aggregator: Contract | null
+  metaTx: Contract | null
 
   creatorVaultAddress: string
   maintenanceVaultAddress: string
   oneMEMEBBAddress: string
   collectorAddress: string
   aggregatorAddress: string
+  metaTxAddress: string
 
   connectWallet: () => Promise<void>
   disconnectWallet: () => void
@@ -73,6 +76,7 @@ export function Web3Provider({ children }: { children: ReactNode }) {
   const [collector, setCollector] = useState<Contract | null>(null)
   const [oneMEMEBB, setOneMEMEBB] = useState<Contract | null>(null)
   const [aggregator, setAggregator] = useState<Contract | null>(null)
+  const [metaTx, setMetaTx] = useState<Contract | null>(null)
 
   const [toasts, setToasts] = useState<{ id: number; message: string; type: 'ok' | 'warn' | 'danger' }[]>([])
   const toastIdRef = useRef(0)
@@ -227,6 +231,11 @@ export function Web3Provider({ children }: { children: ReactNode }) {
         try { setAggregator(new Contract(addresses.aggregator, AGGREGATOR_ABI, p)) }
         catch (err) { console.warn('Aggregator init failed:', err) }
       }
+
+      if (addresses.metaTx) {
+        try { setMetaTx(new Contract(addresses.metaTx, METATX_ABI, p)) }
+        catch (err) { console.warn('MetaTx init failed:', err) }
+      }
     }
 
     initContracts()
@@ -280,11 +289,13 @@ export function Web3Provider({ children }: { children: ReactNode }) {
     collector,
     oneMEMEBB,
     aggregator,
+    metaTx,
     creatorVaultAddress: addresses.creatorVault,
     maintenanceVaultAddress: addresses.maintenanceVault,
     collectorAddress: addresses.collector,
     oneMEMEBBAddress: addresses.oneMEMEBB,
     aggregatorAddress: addresses.aggregator,
+    metaTxAddress: addresses.metaTx,
     connectWallet,
     disconnectWallet,
     toast,

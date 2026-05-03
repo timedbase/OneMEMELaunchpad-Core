@@ -11,6 +11,7 @@ const tabs = [
   { id: 'admin', label: 'Admin' },
   { id: 'peripherals', label: 'Peripherals' },
   { id: 'aggregator', label: 'Aggregator' },
+  { id: 'metatx',     label: 'MetaTx' },
 ]
 
 export default function TabNavigation({ activeTab, onTabChange }: TabNavigationProps) {
