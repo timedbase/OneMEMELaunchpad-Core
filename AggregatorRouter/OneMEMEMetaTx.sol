@@ -8,6 +8,14 @@ pragma solidity ^0.8.32;
  *         Supports Token→BNB (relayerFee ≥ 0) and Token→Token (relayerFee must be 0).
  */
 
+struct SwapStep {
+    bytes32 adapterId;
+    address tokenIn;
+    address tokenOut;
+    uint256 minOut;
+    bytes   adapterData;
+}
+
 interface IOneMEMEAggregator {
     function swap(
         bytes32        adapterId,
@@ -19,6 +27,14 @@ interface IOneMEMEAggregator {
         uint256        deadline,
         bytes calldata adapterData
     ) external payable returns (uint256 amountOut);
+
+    function batchSwap(
+        SwapStep[] calldata steps,
+        uint256             amountIn,
+        uint256             minFinalOut,
+        address             to,
+        uint256             deadline
+    ) external payable returns (uint256 finalAmountOut);
 }
 
 interface IERC20 {
@@ -50,6 +66,15 @@ contract OneMEMEMetaTx {
 
     uint256 private constant _NOT_ENTERED = 1;
     uint256 private constant _ENTERED     = 2;
+
+    bytes32 public constant SWAP_STEP_TYPEHASH = keccak256(
+        "SwapStep(bytes32 adapterId,address tokenIn,address tokenOut,uint256 minOut,bytes adapterData)"
+    );
+
+    bytes32 public constant BATCH_ORDER_TYPEHASH = keccak256(
+        "BatchMetaTxOrder(address user,uint256 nonce,uint256 deadline,SwapStep[] steps,uint256 grossAmountIn,uint256 minFinalOut,address recipient,uint256 swapDeadline,uint256 relayerFee)"
+        "SwapStep(bytes32 adapterId,address tokenIn,address tokenOut,uint256 minOut,bytes adapterData)"
+    );
 
     // adapterData is dynamic (bytes) — hashed per EIP-712.
     bytes32 public constant ORDER_TYPEHASH = keccak256(
@@ -95,6 +120,18 @@ contract OneMEMEMetaTx {
         uint256 relayerFee;    // BNB paid to relayer; requires tokenOut == address(0)
     }
 
+    struct BatchMetaTxOrder {
+        address    user;
+        uint256    nonce;
+        uint256    deadline;
+        SwapStep[] steps;
+        uint256    grossAmountIn;
+        uint256    minFinalOut;
+        address    recipient;
+        uint256    swapDeadline;
+        uint256    relayerFee;
+    }
+
     struct PermitData {
         uint8 permitType;
         bytes data;
@@ -110,6 +147,17 @@ contract OneMEMEMetaTx {
         uint256         amountOut,
         uint256         relayerFee,
         uint256         nonce
+    );
+    event BatchMetaTxExecuted(
+        address indexed user,
+        address indexed relayer,
+        address         tokenIn,
+        address         tokenOut,
+        uint256         grossAmountIn,
+        uint256         amountOut,
+        uint256         relayerFee,
+        uint256         nonce,
+        uint256         stepCount
     );
     event OrdersCancelled(address indexed user, uint256 newNonce);
     event OwnershipTransferInitiated(address indexed proposed);
@@ -239,6 +287,53 @@ contract OneMEMEMetaTx {
         return keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, _structHash(order)));
     }
 
+    function batchExecuteMetaTx(
+        BatchMetaTxOrder calldata order,
+        bytes            calldata sig,
+        PermitData       calldata permit
+    ) external nonReentrant returns (uint256 finalAmountOut) {
+        if (block.timestamp > order.deadline)                                                    revert DeadlineExpired();
+        if (order.steps[0].tokenIn == address(0))                                               revert NativeInputNotSupported();
+        if (order.grossAmountIn == 0)                                                           revert ZeroAmount();
+        if (order.recipient == address(0))                                                      revert ZeroAddress();
+        if (order.relayerFee > 0 && order.steps[order.steps.length - 1].tokenOut != address(0)) revert RelayerFeeRequiresBNBOutput();
+
+        uint256 usedNonce = nonces[order.user];
+        if (order.nonce != usedNonce) revert NonceMismatch();
+        unchecked { nonces[order.user] = usedNonce + 1; }
+
+        _verifyBatchSignature(order, sig);
+
+        address tokenIn = order.steps[0].tokenIn;
+        uint256 tokenBalBefore = _balanceOf(tokenIn, address(this));
+        _pullWithPermit(order.user, tokenIn, order.grossAmountIn, permit);
+        uint256 actualReceived = _balanceOf(tokenIn, address(this)) - tokenBalBefore;
+
+        address swapRecipient = (order.relayerFee > 0) ? address(this) : order.recipient;
+
+        _approve(tokenIn, aggregator, actualReceived);
+
+        uint256 bnbBefore = address(this).balance;
+
+        finalAmountOut = _callBatchSwap(order, actualReceived, swapRecipient);
+
+        _resetApproval(tokenIn, aggregator);
+
+        if (order.relayerFee > 0) {
+            uint256 bnbReceived = address(this).balance - bnbBefore;
+            if (bnbReceived < order.relayerFee) revert InsufficientOutput();
+            _sendNative(msg.sender, order.relayerFee);
+            uint256 userBNB = bnbReceived - order.relayerFee;
+            if (userBNB > 0) _sendNative(order.recipient, userBNB);
+        }
+
+        _emitBatchExecuted(order, finalAmountOut, usedNonce);
+    }
+
+    function batchOrderDigest(BatchMetaTxOrder calldata order) external view returns (bytes32) {
+        return keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, _batchStructHash(order)));
+    }
+
     function _emitExecuted(
         MetaTxOrder calldata order,
         uint256 amountOut,
@@ -339,6 +434,80 @@ contract OneMEMEMetaTx {
                 keccak256(order.adapterData),
                 order.relayerFee
             )
+        ));
+    }
+
+    function _verifyBatchSignature(BatchMetaTxOrder calldata order, bytes calldata sig) internal view {
+        if (sig.length != 65) revert InvalidSignature();
+        bytes32 r; bytes32 s; uint8 v;
+        assembly {
+            r := calldataload(sig.offset)
+            s := calldataload(add(sig.offset, 32))
+            v := byte(0, calldataload(add(sig.offset, 64)))
+        }
+        if (uint256(s) > 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0) {
+            revert InvalidSignature();
+        }
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, _batchStructHash(order)));
+        address recovered = ecrecover(digest, v, r, s);
+        if (recovered == address(0) || recovered != order.user) revert InvalidSignature();
+    }
+
+    function _callBatchSwap(
+        BatchMetaTxOrder calldata order,
+        uint256 actualReceived,
+        address swapRecipient
+    ) internal returns (uint256) {
+        return IOneMEMEAggregator(aggregator).batchSwap(
+            order.steps,
+            actualReceived,
+            order.minFinalOut + order.relayerFee,
+            swapRecipient,
+            order.swapDeadline
+        );
+    }
+
+    function _emitBatchExecuted(
+        BatchMetaTxOrder calldata order,
+        uint256 finalAmountOut,
+        uint256 usedNonce
+    ) internal {
+        emit BatchMetaTxExecuted(
+            order.user,
+            msg.sender,
+            order.steps[0].tokenIn,
+            order.steps[order.steps.length - 1].tokenOut,
+            order.grossAmountIn,
+            finalAmountOut,
+            order.relayerFee,
+            usedNonce,
+            order.steps.length
+        );
+    }
+
+    function _hashSteps(SwapStep[] calldata steps) internal pure returns (bytes32) {
+        bytes32[] memory stepHashes = new bytes32[](steps.length);
+        for (uint256 i = 0; i < steps.length; ) {
+            stepHashes[i] = keccak256(abi.encode(
+                SWAP_STEP_TYPEHASH,
+                steps[i].adapterId,
+                steps[i].tokenIn,
+                steps[i].tokenOut,
+                steps[i].minOut,
+                keccak256(steps[i].adapterData)
+            ));
+            unchecked { ++i; }
+        }
+        return keccak256(abi.encodePacked(stepHashes));
+    }
+
+    function _batchStructHash(BatchMetaTxOrder calldata order) internal pure returns (bytes32) {
+        return keccak256(abi.encode(
+            BATCH_ORDER_TYPEHASH,
+            order.user, order.nonce, order.deadline,
+            _hashSteps(order.steps),
+            order.grossAmountIn, order.minFinalOut,
+            order.recipient, order.swapDeadline, order.relayerFee
         ));
     }
 
