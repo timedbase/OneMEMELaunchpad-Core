@@ -27,6 +27,14 @@ contract OneMEMEAggregator {
         string  name;
     }
 
+    struct SwapStep {
+        bytes32 adapterId;
+        address tokenIn;
+        address tokenOut;
+        uint256 minOut;
+        bytes   adapterData;
+    }
+
     mapping(bytes32 => AdapterEntry) public adapters;
 
     bytes32[] private _adapterIds;
@@ -41,6 +49,15 @@ contract OneMEMEAggregator {
         uint256         grossAmountIn,
         uint256         feeCharged,
         uint256         amountOut
+    );
+    event BatchSwapped(
+        address indexed user,
+        address         tokenIn,
+        address         tokenOut,
+        uint256         grossAmountIn,
+        uint256         feeCharged,
+        uint256         amountOut,
+        uint256         stepCount
     );
     event AdapterRegistered(bytes32 indexed id, address indexed addr, string adapterName);
     event AdapterEnabled(bytes32 indexed id);
@@ -62,6 +79,7 @@ contract OneMEMEAggregator {
     error AdapterNotFound();
     error AdapterIsDisabled();
     error AdapterAlreadyExists();
+    error InsufficientOutput();
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
@@ -115,6 +133,49 @@ contract OneMEMEAggregator {
             (amountOut, fee) = _swapERC20(adapterAddr, tokenIn, amountIn, tokenOut, minOut, to, adapterData);
             emit Swapped(msg.sender, adapterId, tokenIn, tokenOut, amountIn, fee, amountOut);
         }
+    }
+
+    function batchSwap(
+        SwapStep[] calldata steps,
+        uint256             amountIn,
+        uint256             minFinalOut,
+        address             to,
+        uint256             deadline
+    ) external payable nonReentrant returns (uint256 finalAmountOut) {
+        if (block.timestamp > deadline) revert DeadlineExpired();
+        if (to == address(0))           revert ZeroRecipient();
+
+        uint256 fee;
+        uint256 netIn;
+        if (steps[0].tokenIn == address(0)) {
+            if (msg.value == 0) revert NoNativeValue();
+            amountIn = msg.value;
+            (fee, netIn) = _splitFee(amountIn);
+            _sendNative(feeRecipient, fee);
+        } else {
+            amountIn = _pullInput(steps[0].tokenIn, amountIn);
+            (fee, netIn) = _splitFee(amountIn);
+            _safeTransfer(steps[0].tokenIn, feeRecipient, fee);
+        }
+
+        finalAmountOut = _executeSteps(steps, netIn);
+        if (finalAmountOut < minFinalOut) revert InsufficientOutput();
+
+        if (steps[steps.length - 1].tokenOut == address(0)) {
+            _sendNative(to, finalAmountOut);
+        } else {
+            _safeTransfer(steps[steps.length - 1].tokenOut, to, finalAmountOut);
+        }
+
+        emit BatchSwapped(
+            msg.sender,
+            steps[0].tokenIn,
+            steps[steps.length - 1].tokenOut,
+            amountIn,
+            fee,
+            finalAmountOut,
+            steps.length
+        );
     }
 
     // ERC-20 swap extracted to its own stack frame to stay under the 16-slot EVM limit.
@@ -210,6 +271,55 @@ contract OneMEMEAggregator {
     function rescueNative(address recipient, uint256 amount) external onlyOwner {
         if (recipient == address(0)) revert ZeroAddress();
         _sendNative(recipient, amount);
+    }
+
+    function _pullInput(address tokenIn, uint256 amount) internal returns (uint256 received) {
+        uint256 before = _balanceOf(tokenIn, address(this));
+        _pullToken(tokenIn, msg.sender, address(this), amount);
+        received = _balanceOf(tokenIn, address(this)) - before;
+    }
+
+    function _executeSteps(SwapStep[] calldata steps, uint256 netIn) internal returns (uint256 runningAmount) {
+        runningAmount = netIn;
+        uint256 n = steps.length;
+        for (uint256 i = 0; i < n; ) {
+            AdapterEntry storage entry = adapters[steps[i].adapterId];
+            if (entry.addr == address(0)) revert AdapterNotFound();
+            if (!entry.enabled)           revert AdapterIsDisabled();
+            runningAmount = _executeStep(entry.addr, steps[i], runningAmount);
+            if (runningAmount < steps[i].minOut) revert InsufficientOutput();
+            unchecked { ++i; }
+        }
+    }
+
+    function _executeStep(
+        address           adapterAddr,
+        SwapStep calldata step,
+        uint256           stepIn
+    ) internal returns (uint256 stepOut) {
+        bool    nativeOut  = step.tokenOut == address(0);
+        uint256 snapBefore = nativeOut
+            ? address(this).balance
+            : _balanceOf(step.tokenOut, address(this));
+
+        if (step.tokenIn == address(0)) {
+            IAdapter(adapterAddr).execute{value: stepIn}(
+                address(0), stepIn, step.tokenOut, step.minOut, address(this), step.adapterData
+            );
+        } else {
+            _safeTransfer(step.tokenIn, adapterAddr, stepIn);
+            IAdapter(adapterAddr).execute(
+                step.tokenIn, stepIn, step.tokenOut, step.minOut, address(this), step.adapterData
+            );
+        }
+
+        uint256 snapAfter = nativeOut
+            ? address(this).balance
+            : _balanceOf(step.tokenOut, address(this));
+        stepOut = snapAfter - snapBefore;
+        // When tokenIn==address(0) and tokenOut==address(0), sending {value: stepIn}
+        // reduces this.balance before the adapter returns BNB; add it back.
+        if (step.tokenIn == address(0) && nativeOut) stepOut += stepIn;
     }
 
     function _balanceOf(address token, address account) internal view returns (uint256 bal) {
