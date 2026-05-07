@@ -1,0 +1,14 @@
+[profile.default]
+src     = "src"
+out     = "out"
+libs    = ["lib"]
+solc    = "0.8.24"
+optimizer       = true
+optimizer_runs  = 200
+
+# Run fork tests only when BSC_RPC_URL is set:
+#   BSC_RPC_URL=https://bsc-dataseed.binance.org forge test --fork-url $BSC_RPC_URL
+[profile.fork]
+src = "src"
+out = "out"
+libs = ["lib"]
