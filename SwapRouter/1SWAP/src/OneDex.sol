@@ -136,6 +136,18 @@ contract OneDex {
         if (recipient == address(0))    revert ZeroAddress();
         if (tokenIn   == address(0))    revert NativeNotPermitted();
 
+        uint256 actualIn = _pullPermit2(tokenIn, amountIn, permit, signature);
+
+        amountOut = _swap(tokenIn, actualIn, tokenOut, minAmountOut, recipient, executionData);
+        emit Swapped(msg.sender, tokenIn, tokenOut, actualIn, amountOut, recipient);
+    }
+
+    function _pullPermit2(
+        address tokenIn,
+        uint256 amountIn,
+        IPermit2.PermitTransferFrom calldata permit,
+        bytes calldata signature
+    ) internal returns (uint256 actualIn) {
         uint256 before = SafeTransfer.balanceOf(tokenIn, address(this));
         IPermit2(PERMIT2).permitTransferFrom(
             permit,
@@ -143,11 +155,8 @@ contract OneDex {
             msg.sender,
             signature
         );
-        uint256 actualIn = SafeTransfer.balanceOf(tokenIn, address(this)) - before;
+        actualIn = SafeTransfer.balanceOf(tokenIn, address(this)) - before;
         if (actualIn == 0) revert ZeroAmount();
-
-        amountOut = _swap(tokenIn, actualIn, tokenOut, minAmountOut, recipient, executionData);
-        emit Swapped(msg.sender, tokenIn, tokenOut, actualIn, amountOut, recipient);
     }
 
     // ── Core swap logic ───────────────────────────────────────────────────────
