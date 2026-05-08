@@ -49,7 +49,7 @@ contract OneDexTest is Test {
     function setUp() public {
         wbnb        = new MockERC20("Wrapped BNB", "WBNB", 18);
         mockPermit2 = new MockPermit2();
-        executor    = new OneDex(address(wbnb), owner, address(mockPermit2), feeAddr);
+        executor    = new OneDex(address(wbnb), address(mockPermit2), feeAddr);
         router      = new MockRouter();
 
         tokenA   = new MockERC20("Token A", "TKA", 18);
@@ -617,22 +617,22 @@ contract OneDexTest is Test {
 
     function test_constructor_zeroWBNB_reverts() public {
         vm.expectRevert(ZeroAddress.selector);
-        new OneDex(address(0), owner, address(mockPermit2), feeAddr);
-    }
-
-    function test_constructor_zeroOwner_reverts() public {
-        vm.expectRevert(ZeroAddress.selector);
-        new OneDex(address(wbnb), address(0), address(mockPermit2), feeAddr);
+        new OneDex(address(0), address(mockPermit2), feeAddr);
     }
 
     function test_constructor_zeroPermit2_reverts() public {
         vm.expectRevert(ZeroAddress.selector);
-        new OneDex(address(wbnb), owner, address(0), feeAddr);
+        new OneDex(address(wbnb), address(0), feeAddr);
     }
 
     function test_constructor_zeroFeeRecipient_reverts() public {
         vm.expectRevert(ZeroAddress.selector);
-        new OneDex(address(wbnb), owner, address(mockPermit2), address(0));
+        new OneDex(address(wbnb), address(mockPermit2), address(0));
+    }
+
+    function test_constructor_ownerIsDeployer() public {
+        OneDex fresh = new OneDex(address(wbnb), address(mockPermit2), feeAddr);
+        assertEq(fresh.owner(), address(this));
     }
 
     // ── 24. Permit2 ───────────────────────────────────────────────────────────

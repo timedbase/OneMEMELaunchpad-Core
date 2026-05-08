@@ -82,11 +82,11 @@ contract OneDex {
         _;
     }
 
-    constructor(address wbnb_, address initialOwner, address permit2_, address feeRecipient_) {
-        if (wbnb_ == address(0) || initialOwner == address(0) || permit2_ == address(0) || feeRecipient_ == address(0)) revert ZeroAddress();
+    constructor(address wbnb_, address permit2_, address feeRecipient_) {
+        if (wbnb_ == address(0) || permit2_ == address(0) || feeRecipient_ == address(0)) revert ZeroAddress();
         WBNB         = wbnb_;
         PERMIT2      = permit2_;
-        owner        = initialOwner;
+        owner        = msg.sender;
         feeRecipient = feeRecipient_;
     }
 

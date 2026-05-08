@@ -16,13 +16,13 @@ contract Deploy is Script {
 
     function run() external {
         uint256 pk           = vm.envUint("PRIVATE_KEY");
-        address deployer     = vm.envAddress("DEPLOYER");
+        address deployer     = vm.addr(pk);
         address feeRecipient = vm.envAddress("FEE_RECIPIENT");
         address bondingCurve = vm.envOr("BONDING_CURVE", address(0));
 
         vm.startBroadcast(pk);
 
-        OneDex dex = new OneDex(WBNB, deployer, PERMIT2, feeRecipient);
+        OneDex dex = new OneDex(WBNB, PERMIT2, feeRecipient);
 
         uint256 count = bondingCurve != address(0) ? 6 : 5;
         address[] memory targets = new address[](count);
