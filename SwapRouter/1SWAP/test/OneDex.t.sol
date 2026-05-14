@@ -73,7 +73,7 @@ contract OneDexTest is Test {
         vm.stopPrank();
     }
 
-    function _fee(uint256 a) internal pure returns (uint256) { return a * 50 / 10_000; }
+    function _fee(uint256 a) internal pure returns (uint256) { return a * 30 / 10_000; }
     function _net(uint256 a) internal pure returns (uint256) { return a - _fee(a); }
 
     function _tokenSwapStep(
@@ -793,7 +793,7 @@ contract OneDexTest is Test {
 
     function test_feeOnInput_erc20() public {
         uint256 amtIn    = 100 ether;
-        uint256 fee      = _fee(amtIn);    // 0.5 tokenA
+        uint256 fee      = _fee(amtIn);    // 0.3 tokenA
         uint256 swapIn   = amtIn - fee;    // 99.5 tokenA → steps
         uint256 amtOut   = 90 ether;       // router gives 90 tokenB for 99.5 tokenA
         tokenB.mint(address(router), amtOut);

@@ -53,7 +53,7 @@ contract OneDex {
     uint256 private constant _ENTERED     = 2;
     uint256 private _status = _NOT_ENTERED;
 
-    uint256 public constant FEE_BPS = 50; // 0.5 %
+    uint256 public constant FEE_BPS = 30; // 0.3 %
 
     address public owner;
     address public pendingOwner;
