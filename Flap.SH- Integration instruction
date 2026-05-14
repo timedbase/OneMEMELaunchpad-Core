@@ -1,0 +1,13 @@
+Flap.SH also has only 1 entrypoint contract
+
+Flap.sh Contract 0xe2cE6ab80874Fa9Fa2aAE65D277Dd6B8e65C9De0
+
+below i will provide links to documentations {Subgraph} only use the link when we design subgraph, {Trade} only use the link when we creating adapter,subgraph or any trade logic
+
+{Trade} https://docs.flap.sh/flap/developers/wallet-and-terminal-and-bot-developers/trade-tokens
+
+{Subgraph} https://docs.flap.sh/flap/developers/wallet-and-terminal-and-bot-developers/index-token-created-events
+
+{Subgraph} https://docs.flap.sh/flap/developers/wallet-and-terminal-and-bot-developers/parse-token-meta
+
+{Subgraph} https://docs.flap.sh/flap/developers/wallet-and-terminal-and-bot-developers/inspect-a-tax-token

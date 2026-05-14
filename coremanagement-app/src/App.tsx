@@ -8,8 +8,7 @@ import RegistryTab from './components/registry/RegistryTab'
 import InspectorTab from './components/inspector/InspectorTab'
 import AdminTab from './components/admin/AdminTab'
 import PeripheralsTab from './components/peripherals/PeripheralsTab'
-import AggregatorTab from './components/aggregator/AggregatorTab'
-import MetaTxTab from './components/metatx/MetaTxTab'
+import OneDexTab from './components/onedex/OneDexTab'
 import './App.css'
 
 const TOAST_STYLES: Record<string, string> = {
@@ -25,8 +24,7 @@ const TAB_LABELS: Record<string, string> = {
   inspector:   'Inspector',
   admin:       'Admin',
   peripherals: 'Peripherals',
-  aggregator:  'Aggregator',
-  metatx:      'MetaTx',
+  onedex:      '1Dex',
 }
 
 function ToastContainer() {
@@ -82,8 +80,7 @@ function AppContent() {
             {activeTab === 'inspector'   && <InspectorTab />}
             {activeTab === 'admin'       && <AdminTab />}
             {activeTab === 'peripherals' && <PeripheralsTab />}
-            {activeTab === 'aggregator'  && <AggregatorTab />}
-            {activeTab === 'metatx'      && <MetaTxTab />}
+            {activeTab === 'onedex'      && <OneDexTab />}
           </div>
         </main>
       </div>

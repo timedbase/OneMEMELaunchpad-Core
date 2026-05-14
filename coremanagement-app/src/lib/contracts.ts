@@ -127,43 +127,25 @@ export const ONE_MEMEBB_ABI = [
   'function acceptOwnership()',
 ] as const
 
-export const AGGREGATOR_ABI = [
+export const ONEDEX_ABI = [
   'function owner() view returns (address)',
   'function pendingOwner() view returns (address)',
   'function feeRecipient() view returns (address)',
-  'function adapters(bytes32) view returns (address addr, bool enabled, string name)',
-  'function adapterCount() view returns (uint256)',
-  'function adapterAt(uint256) view returns (bytes32 id, address addr, bool enabled, string adapterName)',
-  'function allAdapterIds() view returns (bytes32[])',
-  'function registerAdapter(bytes32,address,bool)',
-  'function enableAdapter(bytes32)',
-  'function disableAdapter(bytes32)',
-  'function upgradeAdapter(bytes32,address)',
+  'function WBNB() view returns (address)',
+  'function PERMIT2() view returns (address)',
+  'function FEE_BPS() view returns (uint256)',
+  'function allowedTargets(address) view returns (bool)',
+  'function isPaused() view returns (bool)',
   'function setFeeRecipient(address)',
+  'function addTarget(address)',
+  'function addTargets(address[])',
+  'function removeTarget(address)',
+  'function pause()',
+  'function unpause()',
   'function transferOwnership(address)',
   'function acceptOwnership()',
-  'function rescueTokens(address,address,uint256)',
+  'function rescueToken(address,address,uint256)',
   'function rescueNative(address,uint256)',
-] as const
-
-export const METATX_ABI = [
-  'function aggregator() view returns (address)',
-  'function permit2() view returns (address)',
-  'function owner() view returns (address)',
-  'function pendingOwner() view returns (address)',
-  'function nonces(address) view returns (uint256)',
-  'function ORDER_TYPEHASH() view returns (bytes32)',
-  'function DOMAIN_SEPARATOR() view returns (bytes32)',
-  'function PERMIT_NONE() view returns (uint8)',
-  'function PERMIT_EIP2612() view returns (uint8)',
-  'function PERMIT_2() view returns (uint8)',
-  'function executeMetaTx((address user, uint256 nonce, uint256 deadline, bytes32 adapterId, address tokenIn, uint256 grossAmountIn, address tokenOut, uint256 minUserOut, address recipient, uint256 swapDeadline, bytes adapterData, uint256 relayerFee) order, bytes sig, (uint8 permitType, bytes data) permit)',
-  'function orderDigest((address user, uint256 nonce, uint256 deadline, bytes32 adapterId, address tokenIn, uint256 grossAmountIn, address tokenOut, uint256 minUserOut, address recipient, uint256 swapDeadline, bytes adapterData, uint256 relayerFee) order) view returns (bytes32)',
-  'function invalidateNonces(uint256)',
-  'function rescueTokens(address,address,uint256)',
-  'function rescueNative(address,uint256)',
-  'function transferOwnership(address)',
-  'function acceptOwnership()',
 ] as const
 
 export const ERC20_ABI = [

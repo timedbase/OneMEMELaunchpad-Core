@@ -16,8 +16,7 @@ import {
   VAULT_ABI,
   COLLECTOR_ABI,
   ONE_MEMEBB_ABI,
-  AGGREGATOR_ABI,
-  METATX_ABI,
+  ONEDEX_ABI,
 } from './contracts'
 
 const BSC_MAINNET_CHAIN_ID = 56
@@ -41,15 +40,13 @@ export interface Web3ContextType {
   maintenanceVault: Contract | null
   collector: Contract | null
   oneMEMEBB: Contract | null
-  aggregator: Contract | null
-  metaTx: Contract | null
+  oneDex: Contract | null
 
   creatorVaultAddress: string
   maintenanceVaultAddress: string
   oneMEMEBBAddress: string
   collectorAddress: string
-  aggregatorAddress: string
-  metaTxAddress: string
+  oneDexAddress: string
 
   connectWallet: () => Promise<void>
   disconnectWallet: () => void
@@ -75,8 +72,7 @@ export function Web3Provider({ children }: { children: ReactNode }) {
   const [maintenanceVault, setMaintenanceVault] = useState<Contract | null>(null)
   const [collector, setCollector] = useState<Contract | null>(null)
   const [oneMEMEBB, setOneMEMEBB] = useState<Contract | null>(null)
-  const [aggregator, setAggregator] = useState<Contract | null>(null)
-  const [metaTx, setMetaTx] = useState<Contract | null>(null)
+  const [oneDex, setOneDex] = useState<Contract | null>(null)
 
   const [toasts, setToasts] = useState<{ id: number; message: string; type: 'ok' | 'warn' | 'danger' }[]>([])
   const toastIdRef = useRef(0)
@@ -227,14 +223,9 @@ export function Web3Provider({ children }: { children: ReactNode }) {
         catch (err) { console.warn('1MEMEBB init failed:', err) }
       }
 
-      if (addresses.aggregator) {
-        try { setAggregator(new Contract(addresses.aggregator, AGGREGATOR_ABI, p)) }
-        catch (err) { console.warn('Aggregator init failed:', err) }
-      }
-
-      if (addresses.metaTx) {
-        try { setMetaTx(new Contract(addresses.metaTx, METATX_ABI, p)) }
-        catch (err) { console.warn('MetaTx init failed:', err) }
+      if (addresses.oneDex) {
+        try { setOneDex(new Contract(addresses.oneDex, ONEDEX_ABI, p)) }
+        catch (err) { console.warn('OneDex init failed:', err) }
       }
     }
 
@@ -288,14 +279,12 @@ export function Web3Provider({ children }: { children: ReactNode }) {
     maintenanceVault,
     collector,
     oneMEMEBB,
-    aggregator,
-    metaTx,
+    oneDex,
     creatorVaultAddress: addresses.creatorVault,
     maintenanceVaultAddress: addresses.maintenanceVault,
     collectorAddress: addresses.collector,
     oneMEMEBBAddress: addresses.oneMEMEBB,
-    aggregatorAddress: addresses.aggregator,
-    metaTxAddress: addresses.metaTx,
+    oneDexAddress: addresses.oneDex,
     connectWallet,
     disconnectWallet,
     toast,

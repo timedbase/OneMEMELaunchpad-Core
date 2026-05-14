@@ -30,8 +30,7 @@ const NAV_GROUPS = [
   {
     label: 'Protocol',
     items: [
-      { id: 'aggregator', label: 'Aggregator', icon: '⇆' },
-      { id: 'metatx',     label: 'MetaTx',     icon: '⚡' },
+      { id: 'onedex', label: '1Dex', icon: '⇆' },
     ],
   },
 ]

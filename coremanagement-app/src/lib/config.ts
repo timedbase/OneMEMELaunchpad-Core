@@ -9,8 +9,7 @@ export const config = {
   collectorAddress:        getEnv('VITE_COLLECTOR_ADDRESS', ''),
   creatorVaultAddress:     getEnv('VITE_CREATOR_VAULT_ADDRESS', ''),
   maintenanceVaultAddress: getEnv('VITE_MAINTENANCE_VAULT_ADDRESS', ''),
-  aggregatorAddress:       getEnv('VITE_AGGREGATOR_ADDRESS', ''),
-  metaTxAddress:           getEnv('VITE_METATX_ADDRESS', ''),
+  oneDexAddress:           getEnv('VITE_ONEDEX_ADDRESS', ''),
   rpcBSCMainnet:           getEnv('VITE_RPC_BSC_MAINNET', 'https://bsc-dataseed.binance.org'),
 }
 
@@ -23,7 +22,6 @@ export function getContractAddresses() {
     collector:        config.collectorAddress,
     creatorVault:     config.creatorVaultAddress,
     maintenanceVault: config.maintenanceVaultAddress,
-    aggregator:       config.aggregatorAddress,
-    metaTx:           config.metaTxAddress,
+    oneDex:           config.oneDexAddress,
   }
 }

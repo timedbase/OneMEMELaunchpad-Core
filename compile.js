@@ -32,19 +32,10 @@ const CONTRACT_FILES = [
   'contracts/tokens/StandardToken.sol',
   'contracts/tokens/TaxToken.sol',
   'contracts/tokens/ReflectionToken.sol',
-  // ── AggregatorRouter ──────────────────────────────────────────────────────
-  'AggregatorRouter/interfaces/IAdapter.sol',
-  'AggregatorRouter/OneMEMEAggregator.sol',
-  'AggregatorRouter/adapters/BaseAdapter.sol',
-  'AggregatorRouter/adapters/GenericV2Adapter.sol',
-  'AggregatorRouter/adapters/GenericV3Adapter.sol',
-  'AggregatorRouter/adapters/OneMEMEAdapter.sol',
-  'AggregatorRouter/adapters/FourMEMEAdapter.sol',
-  'AggregatorRouter/adapters/GenericV4Adapter.sol',
-  'AggregatorRouter/adapters/PancakeSwapAdapter.sol',
-  'AggregatorRouter/adapters/UniswapAdapter.sol',
-  'AggregatorRouter/adapters/FlapSHAdapter.sol',
-  'AggregatorRouter/OneMEMEMetaTx.sol',
+  // ── Router ────────────────────────────────────────────────────────────────
+  'SwapRouter/1SWAP/src/interfaces/IPermit2.sol',
+  'SwapRouter/1SWAP/src/libraries/SafeTransfer.sol',
+  'SwapRouter/1SWAP/src/OneDex.sol',
 ];
 
 // ── Build source map ─────────────────────────────────────────────────────────
