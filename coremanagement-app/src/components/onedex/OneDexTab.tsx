@@ -29,8 +29,11 @@ export default function OneDexTab() {
   const [isSubmitting, setIsSubmitting] = useState(false)
 
   // Target whitelist
-  const [targetAddr, setTargetAddr]   = useState('')
-  const [removeAddr, setRemoveAddr]   = useState('')
+  const [targetAddr, setTargetAddr]       = useState('')
+  const [removeAddr, setRemoveAddr]       = useState('')
+  const [checkAddr, setCheckAddr]         = useState('')
+  const [checkResult, setCheckResult]     = useState<boolean | null>(null)
+  const [checkPending, setCheckPending]   = useState(false)
 
   // Fee recipient
   const [newFeeRecipient, setNewFeeRecipient] = useState('')
@@ -186,6 +189,43 @@ export default function OneDexTab() {
             <div className="text-sm font-bold text-text mb-3 pb-2 border-b border-border">
               Target Whitelist
             </div>
+
+            {/* Check — always visible */}
+            <div className="bg-surface border border-border rounded p-4 space-y-3 mb-4">
+              <div className="font-semibold text-sm">Check Target</div>
+              <div className="flex gap-2">
+                <Input
+                  label=""
+                  placeholder="0x…"
+                  value={checkAddr}
+                  onChange={e => { setCheckAddr(e.target.value); setCheckResult(null) }}
+                  className="flex-1"
+                />
+                <Button
+                  disabled={checkPending}
+                  onClick={async () => {
+                    if (!ethers.isAddress(checkAddr)) return toast('Invalid address', 'danger')
+                    setCheckPending(true)
+                    try {
+                      const allowed = await oneDex.allowedTargets(checkAddr)
+                      setCheckResult(allowed)
+                    } catch (e: any) {
+                      toast(`Check failed: ${e.message}`, 'danger')
+                    } finally {
+                      setCheckPending(false)
+                    }
+                  }}
+                >
+                  Check
+                </Button>
+              </div>
+              {checkResult !== null && (
+                <Badge variant={checkResult ? 'ok' : 'danger'}>
+                  {shortAddr(checkAddr)} is {checkResult ? 'whitelisted' : 'not whitelisted'}
+                </Badge>
+              )}
+            </div>
+
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="bg-surface border border-border rounded p-4 space-y-3">
                 <div className="font-semibold text-sm">Add Target</div>
