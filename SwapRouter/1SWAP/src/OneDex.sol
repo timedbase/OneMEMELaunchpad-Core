@@ -213,16 +213,19 @@ contract OneDex {
                 ? address(this).balance
                 : SafeTransfer.balanceOf(step.tokenOut, address(this));
 
-            (bool ok, bytes memory ret) = step.target.call{value: step.value}(step.callData);
+            uint256 sendValue = step.value == type(uint256).max
+                ? address(this).balance
+                : step.value;
+            (bool ok, bytes memory ret) = step.target.call{value: sendValue}(step.callData);
             if (!ok) {
                 assembly { revert(add(ret, 32), mload(ret)) }
             }
 
             // When a step both sends and receives native BNB, afterBal is already reduced by
-            // step.value, so: delta = afterBal + step.value - snapBefore = bnbReceived.
+            // sendValue, so: delta = afterBal + sendValue - snapBefore = bnbReceived.
             uint256 delta;
             if (step.tokenOut == address(0)) {
-                delta = address(this).balance + step.value - snapBefore;
+                delta = address(this).balance + sendValue - snapBefore;
             } else {
                 delta = SafeTransfer.balanceOf(step.tokenOut, address(this)) - snapBefore;
             }
