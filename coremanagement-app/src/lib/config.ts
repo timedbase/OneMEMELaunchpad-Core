@@ -1,27 +1,73 @@
-const getEnv = (key: string, defaultValue: string = ''): string =>
-  (((import.meta as any).env as Record<string, string>)[key] || defaultValue)
-
-export const config = {
-  factoryAddress:          getEnv('VITE_FACTORY_ADDRESS', ''),
-  bondingCurveAddress:     getEnv('VITE_BONDING_CURVE_ADDRESS', ''),
-  vestingWalletAddress:    getEnv('VITE_VESTING_WALLET_ADDRESS', ''),
-  oneMEMEBBAddress:        getEnv('VITE_ONE_MEMEBB_ADDRESS', ''),
-  collectorAddress:        getEnv('VITE_COLLECTOR_ADDRESS', ''),
-  creatorVaultAddress:     getEnv('VITE_CREATOR_VAULT_ADDRESS', ''),
-  maintenanceVaultAddress: getEnv('VITE_MAINTENANCE_VAULT_ADDRESS', ''),
-  oneDexAddress:           getEnv('VITE_ONEDEX_ADDRESS', ''),
-  rpcBSCMainnet:           getEnv('VITE_RPC_BSC_MAINNET', 'https://bsc-dataseed.binance.org'),
+export interface ChainContracts {
+  factory:          string
+  bondingCurve:     string
+  vestingWallet:    string
+  oneMEMEBB:        string
+  collector:        string
+  creatorVault:     string
+  maintenanceVault: string
+  oneDex:           string
 }
 
-export function getContractAddresses() {
-  return {
-    factory:          config.factoryAddress,
-    bondingCurve:     config.bondingCurveAddress,
-    vestingWallet:    config.vestingWalletAddress,
-    oneMEMEBB:        config.oneMEMEBBAddress,
-    collector:        config.collectorAddress,
-    creatorVault:     config.creatorVaultAddress,
-    maintenanceVault: config.maintenanceVaultAddress,
-    oneDex:           config.oneDexAddress,
-  }
+export interface ChainConfig {
+  chainId:        number
+  name:           string
+  shortName:      string
+  rpc:            string
+  nativeCurrency: { name: string; symbol: string; decimals: number }
+  explorer:       string
+  contracts:      ChainContracts
 }
+
+export const CHAINS: Record<number, ChainConfig> = {
+
+  // ── BNB Smart Chain ───────────────────────────────────────────────────────
+  56: {
+    chainId:        56,
+    name:           'BNB Smart Chain',
+    shortName:      'BSC',
+    rpc:            'https://bsc-dataseed.binance.org',
+    nativeCurrency: { name: 'BNB', symbol: 'BNB', decimals: 18 },
+    explorer:       'https://bscscan.com',
+    contracts: {
+      factory:          '',
+      bondingCurve:     '',
+      vestingWallet:    '',
+      oneMEMEBB:        '',
+      collector:        '',
+      creatorVault:     '',
+      maintenanceVault: '',
+      oneDex:           '',
+    },
+  },
+
+  // ── Ethereum Mainnet ──────────────────────────────────────────────────────
+  1: {
+    chainId:        1,
+    name:           'Ethereum',
+    shortName:      'ETH',
+    rpc:            'https://eth.llamarpc.com',
+    nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+    explorer:       'https://etherscan.io',
+    contracts: {
+      factory:          '',
+      bondingCurve:     '',
+      vestingWallet:    '',
+      oneMEMEBB:        '',
+      collector:        '',
+      creatorVault:     '',
+      maintenanceVault: '',
+      oneDex:           '',
+    },
+  },
+
+}
+
+export const SUPPORTED_CHAIN_IDS = Object.keys(CHAINS).map(Number)
+
+export function getChainConfig(chainId: number): ChainConfig | null {
+  return CHAINS[chainId] ?? null
+}
+
+/** Default read-only chain when no wallet is connected. */
+export const DEFAULT_CHAIN = CHAINS[56]

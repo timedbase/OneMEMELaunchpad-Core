@@ -1,4 +1,5 @@
 import { useWeb3 } from '../../lib/web3-context'
+import { CHAINS, SUPPORTED_CHAIN_IDS } from '../../lib/config'
 import { Button } from '../ui/Button'
 import { Badge } from '../ui/Badge'
 
@@ -7,12 +8,16 @@ function shortAddr(addr: string) {
 }
 
 interface HeaderProps {
-  pageTitle: string
+  pageTitle:    string
   onMenuToggle: () => void
 }
 
 export default function Header({ pageTitle, onMenuToggle }: HeaderProps) {
-  const { account, chainId, isConnecting, isWrongNetwork, connectWallet, disconnectWallet } = useWeb3()
+  const {
+    account, chainId, activeChain,
+    isConnecting, isWrongNetwork,
+    connectWallet, disconnectWallet, switchToChain,
+  } = useWeb3()
 
   return (
     <>
@@ -31,8 +36,27 @@ export default function Header({ pageTitle, onMenuToggle }: HeaderProps) {
         </div>
 
         <div className="flex items-center gap-1.5">
-          {chainId && !isWrongNetwork && <Badge variant="ok">BSC</Badge>}
-          {isWrongNetwork && <Badge variant="danger">Wrong Network</Badge>}
+          {/* Chain badge */}
+          {activeChain && !isWrongNetwork && (
+            <Badge variant="ok">{activeChain.shortName}</Badge>
+          )}
+          {isWrongNetwork && (
+            <>
+              <Badge variant="danger">Wrong Network</Badge>
+              {/* Quick-switch buttons for each supported chain */}
+              {SUPPORTED_CHAIN_IDS.map(id => (
+                <Button
+                  key={id}
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => switchToChain(id)}
+                >
+                  Switch to {CHAINS[id].shortName}
+                </Button>
+              ))}
+            </>
+          )}
+
           {account ? (
             <div className="flex items-center gap-1.5">
               <span className="text-[11px] font-mono text-muted bg-bg px-2 py-1 rounded border border-border">
@@ -50,9 +74,9 @@ export default function Header({ pageTitle, onMenuToggle }: HeaderProps) {
         </div>
       </header>
 
-      {isWrongNetwork && (
+      {isWrongNetwork && chainId && (
         <div className="bg-danger/10 border-b border-danger/20 text-danger text-[11px] text-center py-1.5 px-4 font-medium shrink-0">
-          Wrong network — please switch to BSC Mainnet (Chain ID 56)
+          Chain {chainId} not supported — switch to {SUPPORTED_CHAIN_IDS.map(id => CHAINS[id].name).join(' or ')}
         </div>
       )}
     </>

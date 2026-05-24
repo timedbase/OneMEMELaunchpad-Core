@@ -8,7 +8,13 @@ import {
   ReactNode,
 } from 'react'
 import { BrowserProvider, Contract, ZeroAddress, JsonRpcProvider } from 'ethers'
-import { config, getContractAddresses } from './config'
+import {
+  CHAINS,
+  SUPPORTED_CHAIN_IDS,
+  DEFAULT_CHAIN,
+  getChainConfig,
+  ChainConfig,
+} from './config'
 import {
   FACTORY_ABI,
   BC_ABI,
@@ -19,60 +25,58 @@ import {
   ONEDEX_ABI,
 } from './contracts'
 
-const BSC_MAINNET_CHAIN_ID = 56
-
-// Read-only provider — always available, no wallet required
-const readProvider = new JsonRpcProvider(config.rpcBSCMainnet)
-
 export interface Web3ContextType {
-  provider: BrowserProvider | null
-  signer: any | null
-  account: string | null
-  chainId: number | null
-  isConnected: boolean
+  provider:     BrowserProvider | null
+  signer:       any | null
+  account:      string | null
+  chainId:      number | null
+  activeChain:  ChainConfig | null
+  isConnected:  boolean
   isConnecting: boolean
   isWrongNetwork: boolean
 
-  factory: Contract | null
-  bondingCurve: Contract | null
-  vestingWallet: Contract | null
-  creatorVault: Contract | null
+  factory:          Contract | null
+  bondingCurve:     Contract | null
+  vestingWallet:    Contract | null
+  creatorVault:     Contract | null
   maintenanceVault: Contract | null
-  collector: Contract | null
-  oneMEMEBB: Contract | null
-  oneDex: Contract | null
+  collector:        Contract | null
+  oneMEMEBB:        Contract | null
+  oneDex:           Contract | null
 
-  creatorVaultAddress: string
+  creatorVaultAddress:     string
   maintenanceVaultAddress: string
-  oneMEMEBBAddress: string
-  collectorAddress: string
-  oneDexAddress: string
+  oneMEMEBBAddress:        string
+  collectorAddress:        string
+  oneDexAddress:           string
 
-  connectWallet: () => Promise<void>
+  connectWallet:    () => Promise<void>
   disconnectWallet: () => void
-  toast: (message: string, type?: 'ok' | 'warn' | 'danger') => void
-  toasts: { id: number; message: string; type: 'ok' | 'warn' | 'danger' }[]
-  dismissToast: (id: number) => void
+  switchToChain:    (chainId: number) => Promise<boolean>
+  toast:            (message: string, type?: 'ok' | 'warn' | 'danger') => void
+  toasts:           { id: number; message: string; type: 'ok' | 'warn' | 'danger' }[]
+  dismissToast:     (id: number) => void
 }
 
 const Web3Context = createContext<Web3ContextType | null>(null)
 
 export function Web3Provider({ children }: { children: ReactNode }) {
-  const [provider, setProvider] = useState<BrowserProvider | null>(null)
-  const [signer, setSigner] = useState<any | null>(null)
-  const [account, setAccount] = useState<string | null>(null)
-  const [chainId, setChainId] = useState<number | null>(null)
-  const [isConnecting, setIsConnecting] = useState(false)
+  const [provider,       setProvider]       = useState<BrowserProvider | null>(null)
+  const [signer,         setSigner]         = useState<any | null>(null)
+  const [account,        setAccount]        = useState<string | null>(null)
+  const [chainId,        setChainId]        = useState<number | null>(null)
+  const [activeChain,    setActiveChain]    = useState<ChainConfig | null>(null)
+  const [isConnecting,   setIsConnecting]   = useState(false)
   const [isWrongNetwork, setIsWrongNetwork] = useState(false)
 
-  const [factory, setFactory] = useState<Contract | null>(null)
-  const [bondingCurve, setBondingCurve] = useState<Contract | null>(null)
-  const [vestingWallet, setVestingWallet] = useState<Contract | null>(null)
-  const [creatorVault, setCreatorVault] = useState<Contract | null>(null)
+  const [factory,          setFactory]          = useState<Contract | null>(null)
+  const [bondingCurve,     setBondingCurve]     = useState<Contract | null>(null)
+  const [vestingWallet,    setVestingWallet]    = useState<Contract | null>(null)
+  const [creatorVault,     setCreatorVault]     = useState<Contract | null>(null)
   const [maintenanceVault, setMaintenanceVault] = useState<Contract | null>(null)
-  const [collector, setCollector] = useState<Contract | null>(null)
-  const [oneMEMEBB, setOneMEMEBB] = useState<Contract | null>(null)
-  const [oneDex, setOneDex] = useState<Contract | null>(null)
+  const [collector,        setCollector]        = useState<Contract | null>(null)
+  const [oneMEMEBB,        setOneMEMEBB]        = useState<Contract | null>(null)
+  const [oneDex,           setOneDex]           = useState<Contract | null>(null)
 
   const [toasts, setToasts] = useState<{ id: number; message: string; type: 'ok' | 'warn' | 'danger' }[]>([])
   const toastIdRef = useRef(0)
@@ -87,14 +91,15 @@ export function Web3Provider({ children }: { children: ReactNode }) {
     setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4500)
   }, [])
 
-  // Attempt to switch the connected wallet to BSC Mainnet
-  const switchToBSCMainnet = useCallback(async () => {
+  const switchToChain = useCallback(async (targetChainId: number): Promise<boolean> => {
     const ethereum = (window as any).ethereum
     if (!ethereum) return false
+    const chain = CHAINS[targetChainId]
+    if (!chain) return false
     try {
       await ethereum.request({
         method: 'wallet_switchEthereumChain',
-        params: [{ chainId: '0x38' }],
+        params: [{ chainId: '0x' + targetChainId.toString(16) }],
       })
       return true
     } catch (err: any) {
@@ -103,17 +108,15 @@ export function Web3Provider({ children }: { children: ReactNode }) {
           await ethereum.request({
             method: 'wallet_addEthereumChain',
             params: [{
-              chainId: '0x38',
-              chainName: 'BNB Smart Chain',
-              nativeCurrency: { name: 'BNB', symbol: 'BNB', decimals: 18 },
-              rpcUrls: ['https://bsc-dataseed.binance.org'],
-              blockExplorerUrls: ['https://bscscan.com'],
+              chainId:           '0x' + targetChainId.toString(16),
+              chainName:         chain.name,
+              nativeCurrency:    chain.nativeCurrency,
+              rpcUrls:           [chain.rpc],
+              blockExplorerUrls: [chain.explorer],
             }],
           })
           return true
-        } catch {
-          return false
-        }
+        } catch { return false }
       }
       return false
     }
@@ -121,36 +124,19 @@ export function Web3Provider({ children }: { children: ReactNode }) {
 
   const connectWallet = useCallback(async () => {
     const ethereum = (window as any).ethereum
-    if (!ethereum) {
-      toast('No wallet detected', 'danger')
-      return
-    }
+    if (!ethereum) { toast('No wallet detected', 'danger'); return }
 
     setIsConnecting(true)
     try {
-      const accounts = await ethereum.request({ method: 'eth_requestAccounts' })
-      const newProvider = new BrowserProvider(ethereum)
-      const network = await newProvider.getNetwork()
-      const connectedChainId = Number(network.chainId)
+      const accounts     = await ethereum.request({ method: 'eth_requestAccounts' })
+      const newProvider  = new BrowserProvider(ethereum)
+      const network      = await newProvider.getNetwork()
+      const connectedId  = Number(network.chainId)
+      const supported    = SUPPORTED_CHAIN_IDS.includes(connectedId)
 
-      if (connectedChainId !== BSC_MAINNET_CHAIN_ID) {
-        toast('Wrong network — switching to BSC Mainnet…', 'warn')
-        const switched = await switchToBSCMainnet()
-        if (!switched) {
-          toast('Please switch to BSC Mainnet (chainId 56) to use this app', 'danger')
-          setIsWrongNetwork(true)
-          return
-        }
-        // Re-create provider after switch
-        const switchedProvider = new BrowserProvider(ethereum)
-        const switchedSigner = await switchedProvider.getSigner()
-        const switchedNetwork = await switchedProvider.getNetwork()
-        setProvider(switchedProvider)
-        setSigner(switchedSigner)
-        setAccount(accounts[0])
-        setChainId(Number(switchedNetwork.chainId))
-        setIsWrongNetwork(false)
-        toast('Connected to BSC Mainnet', 'ok')
+      if (!supported) {
+        setIsWrongNetwork(true)
+        toast(`Chain ${connectedId} not supported — switch to ${Object.values(CHAINS).map(c => c.shortName).join(' or ')}`, 'warn')
         return
       }
 
@@ -158,81 +144,69 @@ export function Web3Provider({ children }: { children: ReactNode }) {
       setProvider(newProvider)
       setSigner(newSigner)
       setAccount(accounts[0])
-      setChainId(connectedChainId)
+      setChainId(connectedId)
+      setActiveChain(getChainConfig(connectedId))
       setIsWrongNetwork(false)
-      toast('Wallet connected', 'ok')
+      toast(`Connected on ${CHAINS[connectedId].shortName}`, 'ok')
     } catch (err: any) {
       toast(`Connection failed: ${err.message}`, 'danger')
     } finally {
       setIsConnecting(false)
     }
-  }, [toast, switchToBSCMainnet])
+  }, [toast])
 
   const disconnectWallet = useCallback(() => {
     setSigner(null)
     setAccount(null)
     setChainId(null)
+    setActiveChain(null)
     setIsWrongNetwork(false)
     toast('Wallet disconnected', 'ok')
   }, [toast])
 
-  // Initialize contracts whenever the signer changes (or on first mount with readProvider)
+  // Re-initialize all contracts whenever signer or chainId changes
   useEffect(() => {
-    const initContracts = async () => {
-      const factoryAddr = config.factoryAddress
-      if (!factoryAddr) return
+    const chain    = (chainId ? getChainConfig(chainId) : null) ?? DEFAULT_CHAIN
+    const rpc      = chain.rpc
+    const p        = signer ?? new JsonRpcProvider(rpc)
+    const addrs    = chain.contracts
 
-      const p = signer ?? readProvider
+    // Reset all
+    setFactory(null); setBondingCurve(null); setVestingWallet(null)
+    setCreatorVault(null); setMaintenanceVault(null)
+    setCollector(null); setOneMEMEBB(null); setOneDex(null)
 
+    const init = async () => {
       try {
-        const factoryContract = new Contract(factoryAddr, FACTORY_ABI, p)
-        setFactory(factoryContract)
-
-        const bcAddr = await factoryContract.migrator()
-        if (bcAddr && bcAddr !== ZeroAddress) {
-          setBondingCurve(new Contract(bcAddr, BC_ABI, p))
+        if (addrs.factory) {
+          const f = new Contract(addrs.factory, FACTORY_ABI, p)
+          setFactory(f)
+          const bcAddr = await f.migrator()
+          if (bcAddr && bcAddr !== ZeroAddress)
+            setBondingCurve(new Contract(bcAddr, BC_ABI, p))
+          const vwAddr = await f.vestingWallet()
+          if (vwAddr && vwAddr !== ZeroAddress)
+            setVestingWallet(new Contract(vwAddr, VW_ABI, p))
         }
+      } catch (err) { console.error('Factory init error:', err) }
 
-        const vwAddr = await factoryContract.vestingWallet()
-        if (vwAddr && vwAddr !== ZeroAddress) {
-          setVestingWallet(new Contract(vwAddr, VW_ABI, p))
-        }
-      } catch (err) {
-        console.error('Factory init error:', err)
+      const tryInit = (addr: string, abi: any, set: (c: Contract) => void, label: string) => {
+        if (!addr) return
+        try { set(new Contract(addr, abi, p)) }
+        catch (err) { console.warn(`${label} init failed:`, err) }
       }
 
-      const addresses = getContractAddresses()
-
-      if (addresses.creatorVault) {
-        try { setCreatorVault(new Contract(addresses.creatorVault, VAULT_ABI, p)) }
-        catch (err) { console.warn('CreatorVault init failed:', err) }
-      }
-
-      if (addresses.maintenanceVault) {
-        try { setMaintenanceVault(new Contract(addresses.maintenanceVault, VAULT_ABI, p)) }
-        catch (err) { console.warn('MaintenanceVault init failed:', err) }
-      }
-
-      if (addresses.collector) {
-        try { setCollector(new Contract(addresses.collector, COLLECTOR_ABI, p)) }
-        catch (err) { console.warn('Collector init failed:', err) }
-      }
-
-      if (addresses.oneMEMEBB) {
-        try { setOneMEMEBB(new Contract(addresses.oneMEMEBB, ONE_MEMEBB_ABI, p)) }
-        catch (err) { console.warn('1MEMEBB init failed:', err) }
-      }
-
-      if (addresses.oneDex) {
-        try { setOneDex(new Contract(addresses.oneDex, ONEDEX_ABI, p)) }
-        catch (err) { console.warn('OneDex init failed:', err) }
-      }
+      tryInit(addrs.creatorVault,     VAULT_ABI,       setCreatorVault,     'CreatorVault')
+      tryInit(addrs.maintenanceVault, VAULT_ABI,       setMaintenanceVault, 'MaintenanceVault')
+      tryInit(addrs.collector,        COLLECTOR_ABI,   setCollector,        'Collector')
+      tryInit(addrs.oneMEMEBB,        ONE_MEMEBB_ABI,  setOneMEMEBB,        '1MEMEBB')
+      tryInit(addrs.oneDex,           ONEDEX_ABI,      setOneDex,           'OneDex')
     }
 
-    initContracts()
-  }, [signer])
+    init()
+  }, [signer, chainId])
 
-  // Listen for account/chain changes
+  // Listen for wallet account/chain changes
   useEffect(() => {
     const ethereum = (window as any).ethereum
     if (!ethereum) return
@@ -243,33 +217,32 @@ export function Web3Provider({ children }: { children: ReactNode }) {
     }
 
     const handleChainChanged = (chainIdHex: string) => {
-      const id = parseInt(chainIdHex, 16)
+      const id        = parseInt(chainIdHex, 16)
+      const supported = SUPPORTED_CHAIN_IDS.includes(id)
       setChainId(id)
-      setIsWrongNetwork(id !== BSC_MAINNET_CHAIN_ID)
-      if (id !== BSC_MAINNET_CHAIN_ID) {
-        setSigner(null)
-        setAccount(null)
-      } else {
-        window.location.reload()
-      }
+      setActiveChain(supported ? getChainConfig(id) : null)
+      setIsWrongNetwork(!supported)
+      if (!supported) { setSigner(null); setAccount(null) }
+      else window.location.reload()
     }
 
     ethereum.on('accountsChanged', handleAccountsChanged)
-    ethereum.on('chainChanged', handleChainChanged)
+    ethereum.on('chainChanged',    handleChainChanged)
     return () => {
       ethereum.removeListener('accountsChanged', handleAccountsChanged)
-      ethereum.removeListener('chainChanged', handleChainChanged)
+      ethereum.removeListener('chainChanged',    handleChainChanged)
     }
   }, [connectWallet, disconnectWallet])
 
-  const addresses = getContractAddresses()
+  const chain = activeChain ?? DEFAULT_CHAIN
 
   const value: Web3ContextType = {
     provider,
     signer,
     account,
     chainId,
-    isConnected: !!account,
+    activeChain,
+    isConnected:  !!account,
     isConnecting,
     isWrongNetwork,
     factory,
@@ -280,13 +253,14 @@ export function Web3Provider({ children }: { children: ReactNode }) {
     collector,
     oneMEMEBB,
     oneDex,
-    creatorVaultAddress: addresses.creatorVault,
-    maintenanceVaultAddress: addresses.maintenanceVault,
-    collectorAddress: addresses.collector,
-    oneMEMEBBAddress: addresses.oneMEMEBB,
-    oneDexAddress: addresses.oneDex,
+    creatorVaultAddress:     chain.contracts.creatorVault,
+    maintenanceVaultAddress: chain.contracts.maintenanceVault,
+    collectorAddress:        chain.contracts.collector,
+    oneMEMEBBAddress:        chain.contracts.oneMEMEBB,
+    oneDexAddress:           chain.contracts.oneDex,
     connectWallet,
     disconnectWallet,
+    switchToChain,
     toast,
     toasts,
     dismissToast,
