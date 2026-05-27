@@ -4,22 +4,29 @@ pragma solidity ^0.8.24;
 import {IUniV3Factory} from "../../src/interfaces/IUniV3Factory.sol";
 import {IUniV3Pool}    from "../../src/interfaces/IUniV3Pool.sol";
 
-/// @dev Minimal mock factory used for V3 callback validation tests.
+/**
+ * @notice Proper mock V3 factory: maps (token0, token1, fee) → pool.
+ *         Used as the main test suite factory so multiple pools/routers
+ *         can be registered with distinct (t0, t1, fee) triplets.
+ */
 contract MockV3Factory is IUniV3Factory {
-    mapping(address => address) public poolByAddress;
+    mapping(address => mapping(address => mapping(uint24 => address))) private _pools;
 
-    function registerPool(address pool) external {
-        poolByAddress[pool] = pool;
+    function registerPool(address t0, address t1, uint24 fee, address pool) external {
+        _pools[t0][t1][fee] = pool;
+        _pools[t1][t0][fee] = pool;
     }
 
-    /// @dev Returns the registered pool if all three args match (simplified — just checks pool exists).
-    function getPool(address, address, uint24) external view returns (address) {
-        // For testing we return a sentinel. Caller overrides per test.
-        return address(0);
+    function getPool(address t0, address t1, uint24 fee) external view returns (address) {
+        return _pools[t0][t1][fee];
     }
 }
 
-/// @dev A configurable mock factory that always returns a pre-set pool address.
+/**
+ * @notice Simplified mock factory that always returns the same address regardless
+ *         of input — useful for V3 callback validation tests where there is only
+ *         one pool under test.
+ */
 contract ConfigurableV3Factory is IUniV3Factory {
     address public poolToReturn;
 
@@ -30,16 +37,23 @@ contract ConfigurableV3Factory is IUniV3Factory {
     }
 }
 
-/// @dev Mock V3 pool that exposes token0/token1/fee and can trigger a callback on OneDex.
 interface ICallbackTarget {
     function uniswapV3SwapCallback(int256 amount0Delta, int256 amount1Delta, bytes calldata data) external;
     function pancakeV3SwapCallback(int256 amount0Delta, int256 amount1Delta, bytes calldata data) external;
 }
 
+/**
+ * @notice Mock V3 pool: implements IUniV3Pool (token0/token1/fee) and provides
+ *         a simple swap() that sends a pre-configured output token to the caller.
+ *         Also exposes trigger helpers to fire the V3 callbacks on a target.
+ */
 contract MockV3Pool is IUniV3Pool {
     address public token0;
     address public token1;
     uint24  public fee;
+
+    address private _outToken;
+    uint256 private _outAmount;
 
     constructor(address t0, address t1, uint24 fee_) {
         token0 = t0;
@@ -47,7 +61,23 @@ contract MockV3Pool is IUniV3Pool {
         fee    = fee_;
     }
 
-    /// @dev Triggers the Uniswap V3 callback on `target` with the given deltas and data.
+    /// @dev Pre-load the output the pool emits on swap().
+    function prepareOutput(address outToken, uint256 outAmount) external {
+        _outToken  = outToken;
+        _outAmount = outAmount;
+    }
+
+    /// @dev Minimal swap: sends _outAmount of _outToken to `recipient`.
+    function swap(uint256, uint256, address recipient, bytes calldata) external {
+        if (_outAmount > 0) {
+            (bool ok,) = _outToken.call(
+                abi.encodeWithSignature("transfer(address,uint256)", recipient, _outAmount)
+            );
+            require(ok, "MockV3Pool: transfer failed");
+        }
+    }
+
+    /// @dev Triggers the Uniswap V3 callback on `target`.
     function triggerUniCallback(
         address target,
         int256  amount0Delta,

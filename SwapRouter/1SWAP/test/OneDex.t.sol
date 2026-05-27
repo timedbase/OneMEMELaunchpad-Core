@@ -5,6 +5,7 @@ import {Test, console} from "forge-std/Test.sol";
 import {
     OneDex,
     Step,
+    SwapCallbackData,
     Reentrancy,
     Paused,
     NotOwner,
@@ -21,18 +22,23 @@ import {IPermit2}              from "../src/interfaces/IPermit2.sol";
 import {MockERC20}             from "./mocks/MockERC20.sol";
 import {MockFOTToken}          from "./mocks/MockFOTToken.sol";
 import {MockRouter,
-        MockReentrantRouter,
+        ReentrantPool,
         MockUnwhitelistedRouter} from "./mocks/MockRouter.sol";
 import {MockPermit2}           from "./mocks/MockPermit2.sol";
-import {MockV3Pool,
+import {MockV2Factory,
+        MockV2Pair}            from "./mocks/MockV2Pair.sol";
+import {MockV3Factory,
+        MockV3Pool,
         ConfigurableV3Factory} from "./mocks/MockV3Pool.sol";
-import {SwapCallbackData}      from "../src/OneDex.sol";
 
 contract OneDexTest is Test {
+
+    // ── Core fixtures ─────────────────────────────────────────────────────────
 
     OneDex      executor;
     MockRouter  router;
     MockPermit2 mockPermit2;
+    MockV3Factory testV3Factory; // keys: (token0, token1, fee) → pool
 
     MockERC20    tokenA;
     MockERC20    tokenB;
@@ -49,19 +55,39 @@ contract OneDexTest is Test {
     uint256 constant MAX_DEADLINE = type(uint256).max;
     uint256 constant FOT_BPS      = 500;
 
-    function setUp() public {
-        wbnb        = new MockERC20("Wrapped BNB", "WBNB", 18);
-        mockPermit2 = new MockPermit2();
-        executor    = new OneDex(address(wbnb), address(mockPermit2), feeAddr, address(0), address(0));
-        router      = new MockRouter();
+    // MockRouter pretends to be a V3 pool with (tokenA, tokenB, 3000).
+    // The testV3Factory maps that triplet to address(router), so _validateTarget passes.
+    uint24  constant ROUTER_FEE = 3000;
 
+    function setUp() public {
+        // Tokens first — needed for MockRouter constructor
+        wbnb     = new MockERC20("Wrapped BNB", "WBNB", 18);
         tokenA   = new MockERC20("Token A", "TKA", 18);
         tokenB   = new MockERC20("Token B", "TKB", 18);
         tokenC   = new MockERC20("Token C", "TKC", 18);
         fotToken = new MockFOTToken("FeeToken", "FOT", 18, FOT_BPS, taxBucket);
 
-        executor.addTarget(address(router));
+        mockPermit2 = new MockPermit2();
 
+        // Router acts as a V3 pool identity: (tokenA, tokenB, 3000)
+        router = new MockRouter(address(tokenA), address(tokenB), ROUTER_FEE);
+
+        // Factory recognises address(router) as the pool for (tokenA, tokenB, 3000)
+        testV3Factory = new MockV3Factory();
+        testV3Factory.registerPool(address(tokenA), address(tokenB), ROUTER_FEE, address(router));
+
+        // executor: CAKE_V3_FACTORY = testV3Factory; all other factories = address(0)
+        executor = new OneDex(
+            address(wbnb),
+            address(mockPermit2),
+            feeAddr,
+            address(0),        // uniV2Factory
+            address(0),        // cakeV2Factory
+            address(0),        // uniV3Factory
+            address(testV3Factory) // cakeV3Factory
+        );
+
+        // Fund router with output tokens / BNB
         tokenB.mint(address(router), 1_000 ether);
         tokenC.mint(address(router), 1_000 ether);
         vm.deal(address(router), 100 ether);
@@ -76,9 +102,12 @@ contract OneDexTest is Test {
         vm.stopPrank();
     }
 
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
     function _fee(uint256 a) internal pure returns (uint256) { return a * 30 / 10_000; }
     function _net(uint256 a) internal pure returns (uint256) { return a - _fee(a); }
 
+    /// @dev Build a Step that uses the mock router (approve/pull style, V3-like).
     function _tokenSwapStep(
         address tkIn,
         uint256 amtIn,
@@ -87,13 +116,15 @@ contract OneDexTest is Test {
         uint256 minDelta
     ) internal view returns (Step memory) {
         return Step({
-            target:       address(router),
-            value:        0,
-            callData:     abi.encodeCall(router.swapTokens, (tkIn, amtIn, tkOut, amtOut)),
-            approveToken: tkIn,
-            approveAmt:   amtIn,
-            tokenOut:     tkOut,
-            minDelta:     minDelta
+            target:           address(router),
+            value:            0,
+            callData:         abi.encodeCall(router.swapTokens, (tkIn, amtIn, tkOut, amtOut)),
+            approveToken:     tkIn,
+            approveAmt:       amtIn,
+            preTransferToken: address(0),
+            preTransferAmt:   0,
+            tokenOut:         tkOut,
+            minDelta:         minDelta
         });
     }
 
@@ -104,13 +135,15 @@ contract OneDexTest is Test {
         uint256 minDelta
     ) internal view returns (Step memory) {
         return Step({
-            target:       address(router),
-            value:        0,
-            callData:     abi.encodeCall(router.swapTokensForBNB, (tkIn, amtIn, bnbOut)),
-            approveToken: tkIn,
-            approveAmt:   amtIn,
-            tokenOut:     address(0),
-            minDelta:     minDelta
+            target:           address(router),
+            value:            0,
+            callData:         abi.encodeCall(router.swapTokensForBNB, (tkIn, amtIn, bnbOut)),
+            approveToken:     tkIn,
+            approveAmt:       amtIn,
+            preTransferToken: address(0),
+            preTransferAmt:   0,
+            tokenOut:         address(0),
+            minDelta:         minDelta
         });
     }
 
@@ -121,13 +154,15 @@ contract OneDexTest is Test {
         uint256 minDelta
     ) internal view returns (Step memory) {
         return Step({
-            target:       address(router),
-            value:        bnbIn,
-            callData:     abi.encodeCall(router.swapBNBForTokens, (tkOut, amtOut)),
-            approveToken: address(0),
-            approveAmt:   0,
-            tokenOut:     tkOut,
-            minDelta:     minDelta
+            target:           address(router),
+            value:            bnbIn,
+            callData:         abi.encodeCall(router.swapBNBForTokens, (tkOut, amtOut)),
+            approveToken:     address(0),
+            approveAmt:       0,
+            preTransferToken: address(0),
+            preTransferAmt:   0,
+            tokenOut:         tkOut,
+            minDelta:         minDelta
         });
     }
 
@@ -136,19 +171,11 @@ contract OneDexTest is Test {
         steps[0] = step;
         return abi.encode(feeOnInput, steps);
     }
-
     function _encode(Step[] memory steps, bool feeOnInput) internal pure returns (bytes memory) {
         return abi.encode(feeOnInput, steps);
     }
-
-    // Convenience wrappers — fee on output by default
-    function _encode(Step memory step) internal pure returns (bytes memory) {
-        return _encode(step, false);
-    }
-
-    function _encode(Step[] memory steps) internal pure returns (bytes memory) {
-        return _encode(steps, false);
-    }
+    function _encode(Step memory step) internal pure returns (bytes memory) { return _encode(step, false); }
+    function _encode(Step[] memory steps) internal pure returns (bytes memory) { return _encode(steps, false); }
 
     function _permit2(address token, uint256 amount) internal pure returns (IPermit2.PermitTransferFrom memory) {
         return IPermit2.PermitTransferFrom({
@@ -201,13 +228,15 @@ contract OneDexTest is Test {
     function test_swapFOT_slippage_reverts() public {
         uint256 nominal = 100 ether;
         Step memory step = Step({
-            target:       address(router),
-            value:        0,
-            callData:     abi.encodeCall(router.swapTokens, (address(fotToken), nominal, address(tokenB), 90 ether)),
-            approveToken: address(fotToken),
-            approveAmt:   nominal,
-            tokenOut:     address(tokenB),
-            minDelta:     1
+            target:           address(router),
+            value:            0,
+            callData:         abi.encodeCall(router.swapTokens, (address(fotToken), nominal, address(tokenB), 90 ether)),
+            approveToken:     address(fotToken),
+            approveAmt:       nominal,
+            preTransferToken: address(0),
+            preTransferAmt:   0,
+            tokenOut:         address(tokenB),
+            minDelta:         1
         });
 
         vm.prank(user);
@@ -346,24 +375,47 @@ contract OneDexTest is Test {
         executor.execute(address(tokenA), 1, address(tokenB), 1, recipient, MAX_DEADLINE, _encode(steps));
     }
 
-    // ── 11. Whitelist enforcement ─────────────────────────────────────────────
+    // ── 11. _validateTarget — rejection ───────────────────────────────────────
 
-    function test_nonWhitelistedTarget_reverts() public {
+    function test_noToken0_reverts() public {
+        // MockUnwhitelistedRouter has no token0() → _validateTarget catches revert → RouterNotWhitelisted
         MockUnwhitelistedRouter bad = new MockUnwhitelistedRouter();
         Step memory step = Step({
-            target:       address(bad),
-            value:        0,
-            callData:     abi.encodeCall(bad.doSomething, ()),
-            approveToken: address(0),
-            approveAmt:   0,
-            tokenOut:     address(tokenB),
-            minDelta:     0
+            target:           address(bad),
+            value:            0,
+            callData:         abi.encodeCall(bad.doSomething, ()),
+            approveToken:     address(0),
+            approveAmt:       0,
+            preTransferToken: address(0),
+            preTransferAmt:   0,
+            tokenOut:         address(tokenB),
+            minDelta:         0
         });
-        tokenA.mint(address(executor), 1);
 
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(RouterNotWhitelisted.selector, address(bad)));
         executor.execute(address(tokenA), 1, address(tokenB), 0, recipient, MAX_DEADLINE, _encode(step));
+    }
+
+    function test_unknownPool_notInFactory_reverts() public {
+        // Deploy a pool with token0/token1/fee but NOT registered in testV3Factory
+        MockV3Pool unregistered = new MockV3Pool(address(tokenA), address(tokenC), 500);
+
+        Step memory step = Step({
+            target:           address(unregistered),
+            value:            0,
+            callData:         hex"",
+            approveToken:     address(0),
+            approveAmt:       0,
+            preTransferToken: address(0),
+            preTransferAmt:   0,
+            tokenOut:         address(tokenC),
+            minDelta:         0
+        });
+
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(RouterNotWhitelisted.selector, address(unregistered)));
+        executor.execute(address(tokenA), 1, address(tokenC), 0, recipient, MAX_DEADLINE, _encode(step));
     }
 
     // ── 12. Router revert bubbling ────────────────────────────────────────────
@@ -371,14 +423,17 @@ contract OneDexTest is Test {
     function test_routerRevert_bubbles() public {
         string memory reason = "PancakeSwap: K";
         Step memory step = Step({
-            target:       address(router),
-            value:        0,
-            callData:     abi.encodeCall(router.revertWith, (reason)),
-            approveToken: address(0),
-            approveAmt:   0,
-            tokenOut:     address(tokenB),
-            minDelta:     0
+            target:           address(router),
+            value:            0,
+            callData:         abi.encodeCall(router.revertWith, (reason)),
+            approveToken:     address(0),
+            approveAmt:       0,
+            preTransferToken: address(0),
+            preTransferAmt:   0,
+            tokenOut:         address(tokenB),
+            minDelta:         0
         });
+
         tokenA.mint(user, 1);
         vm.prank(user);
         tokenA.approve(address(executor), 1);
@@ -400,7 +455,7 @@ contract OneDexTest is Test {
         executor.execute(address(tokenA), 1, address(tokenB), 1, recipient, MAX_DEADLINE, _encode(step));
     }
 
-    function test_unpause_restoressExecution() public {
+    function test_unpause_restoresExecution() public {
         executor.pause();
         executor.unpause();
         assertFalse(executor.isPaused());
@@ -424,67 +479,39 @@ contract OneDexTest is Test {
     // ── 14. Reentrancy guard ──────────────────────────────────────────────────
 
     function test_reentrancyGuard() public {
+        // Inner call with empty steps — will revert at EmptyRoute inside the reentrant call,
+        // which causes ok=false, which satisfies require(!ok) in ReentrantPool.
         Step[] memory innerSteps = new Step[](0);
-        bytes memory innerExecData = abi.encode(innerSteps);
+        bytes memory innerExecData = abi.encode(false, innerSteps);
         bytes memory reentrantCalldata = abi.encodeCall(
             executor.execute,
             (address(tokenA), 1, address(tokenB), 0, recipient, MAX_DEADLINE, innerExecData)
         );
 
-        MockReentrantRouter reentranter = new MockReentrantRouter(address(executor), reentrantCalldata);
-        executor.addTarget(address(reentranter));
-        tokenA.mint(user, 1);
-        vm.prank(user);
-        tokenA.approve(address(executor), 1);
+        // ReentrantPool has a distinct (tokenA, tokenC, 500) identity so it can be registered
+        ReentrantPool reentranter = new ReentrantPool(
+            address(tokenA), address(tokenC), 500, address(executor), reentrantCalldata
+        );
+        testV3Factory.registerPool(address(tokenA), address(tokenC), 500, address(reentranter));
 
         Step memory step = Step({
-            target:       address(reentranter),
-            value:        0,
-            callData:     hex"",
-            approveToken: address(0),
-            approveAmt:   0,
-            tokenOut:     address(tokenB),
-            minDelta:     0
+            target:           address(reentranter),
+            value:            0,
+            callData:         hex"",  // triggers fallback → reentrancy attempt
+            approveToken:     address(0),
+            approveAmt:       0,
+            preTransferToken: address(0),
+            preTransferAmt:   0,
+            tokenOut:         address(tokenB),
+            minDelta:         0
         });
 
         vm.prank(user);
+        // Outer execute succeeds; inner reentrancy is blocked (Reentrancy error → ok=false)
         executor.execute(address(tokenA), 1, address(tokenB), 0, recipient, MAX_DEADLINE, _encode(step));
     }
 
-    // ── 15. Admin access control ──────────────────────────────────────────────
-
-    function test_addTarget_onlyOwner() public {
-        vm.prank(user);
-        vm.expectRevert(NotOwner.selector);
-        executor.addTarget(address(0x1234));
-    }
-
-    function test_removeTarget_onlyOwner() public {
-        vm.prank(user);
-        vm.expectRevert(NotOwner.selector);
-        executor.removeTarget(address(router));
-    }
-
-    function test_addTarget_zeroAddress_reverts() public {
-        vm.expectRevert(ZeroAddress.selector);
-        executor.addTarget(address(0));
-    }
-
-    function test_removeTarget_disablesRouter() public {
-        executor.removeTarget(address(router));
-        assertFalse(executor.allowedTargets(address(router)));
-
-        Step memory step = _tokenSwapStep(address(tokenA), 1, address(tokenB), 1, 1);
-        tokenA.mint(user, 1);
-        vm.prank(user);
-        tokenA.approve(address(executor), 1);
-
-        vm.prank(user);
-        vm.expectRevert(abi.encodeWithSelector(RouterNotWhitelisted.selector, address(router)));
-        executor.execute(address(tokenA), 1, address(tokenB), 1, recipient, MAX_DEADLINE, _encode(step));
-    }
-
-    // ── 16. Emergency rescue ──────────────────────────────────────────────────
+    // ── 15. Emergency rescue ──────────────────────────────────────────────────
 
     function test_rescueToken() public {
         uint256 stuck = 50 ether;
@@ -508,7 +535,7 @@ contract OneDexTest is Test {
         executor.rescueToken(address(tokenA), user, 1);
     }
 
-    // ── 17. Ownership transfer (two-step) ─────────────────────────────────────
+    // ── 16. Ownership transfer (two-step) ─────────────────────────────────────
 
     function test_transferOwnership_twoStep() public {
         executor.transferOwnership(user);
@@ -530,7 +557,7 @@ contract OneDexTest is Test {
         executor.acceptOwnership();
     }
 
-    // ── 18. Zero amount ───────────────────────────────────────────────────────
+    // ── 17. Zero amount ───────────────────────────────────────────────────────
 
     function test_zeroAmountIn_erc20_reverts() public {
         Step memory step = _tokenSwapStep(address(tokenA), 0, address(tokenB), 0, 0);
@@ -548,7 +575,7 @@ contract OneDexTest is Test {
         executor.execute{value: 0}(address(0), 0, address(tokenB), 0, recipient, MAX_DEADLINE, _encode(step));
     }
 
-    // ── 19. Zero recipient ────────────────────────────────────────────────────
+    // ── 18. Zero recipient ────────────────────────────────────────────────────
 
     function test_zeroRecipient_reverts() public {
         Step memory step = _tokenSwapStep(address(tokenA), 1, address(tokenB), 1, 1);
@@ -561,29 +588,7 @@ contract OneDexTest is Test {
         executor.execute(address(tokenA), 1, address(tokenB), 1, address(0), MAX_DEADLINE, _encode(step));
     }
 
-    // ── 20. addTargets batch ──────────────────────────────────────────────────
-
-    function test_addTargets_batch() public {
-        address a = makeAddr("a");
-        address b = makeAddr("b");
-        address[] memory targets = new address[](2);
-        targets[0] = a;
-        targets[1] = b;
-        executor.addTargets(targets);
-        assertTrue(executor.allowedTargets(a));
-        assertTrue(executor.allowedTargets(b));
-    }
-
-    function test_addTargets_zeroInBatch_reverts() public {
-        address[] memory targets = new address[](2);
-        targets[0] = makeAddr("good");
-        targets[1] = address(0);
-
-        vm.expectRevert(ZeroAddress.selector);
-        executor.addTargets(targets);
-    }
-
-    // ── 21. Rebasing token ────────────────────────────────────────────────────
+    // ── 19. Rebasing token ────────────────────────────────────────────────────
 
     function test_rebasingToken_balanceDeltaSafe() public {
         uint256 amtIn  = 100 ether;
@@ -602,7 +607,7 @@ contract OneDexTest is Test {
         assertEq(tokenB.balanceOf(address(executor)), 0);
     }
 
-    // ── 22. Approval reset after step ────────────────────────────────────────
+    // ── 20. Approval reset after step ────────────────────────────────────────
 
     function test_approvalResetAfterStep() public {
         uint256 amtIn  = 100 ether;
@@ -616,37 +621,43 @@ contract OneDexTest is Test {
         assertEq(tokenA.allowance(address(executor), address(router)), 0);
     }
 
-    // ── 23. Constructor guards ────────────────────────────────────────────────
+    // ── 21. Constructor guards ────────────────────────────────────────────────
 
     function test_constructor_zeroWBNB_reverts() public {
         vm.expectRevert(ZeroAddress.selector);
-        new OneDex(address(0), address(mockPermit2), feeAddr, address(0), address(0));
+        new OneDex(address(0), address(mockPermit2), feeAddr, address(0), address(0), address(0), address(0));
     }
 
     function test_constructor_zeroPermit2_reverts() public {
         vm.expectRevert(ZeroAddress.selector);
-        new OneDex(address(wbnb), address(0), feeAddr, address(0), address(0));
+        new OneDex(address(wbnb), address(0), feeAddr, address(0), address(0), address(0), address(0));
     }
 
     function test_constructor_zeroFeeRecipient_reverts() public {
         vm.expectRevert(ZeroAddress.selector);
-        new OneDex(address(wbnb), address(mockPermit2), address(0), address(0), address(0));
+        new OneDex(address(wbnb), address(mockPermit2), address(0), address(0), address(0), address(0), address(0));
     }
 
     function test_constructor_ownerIsDeployer() public {
-        OneDex fresh = new OneDex(address(wbnb), address(mockPermit2), feeAddr, address(0), address(0));
+        OneDex fresh = new OneDex(address(wbnb), address(mockPermit2), feeAddr,
+                                   address(0), address(0), address(0), address(0));
         assertEq(fresh.owner(), address(this));
     }
 
-    function test_constructor_factoryAddressesStored() public {
-        address uni  = makeAddr("uniFactory");
-        address cake = makeAddr("cakeFactory");
-        OneDex fresh = new OneDex(address(wbnb), address(mockPermit2), feeAddr, uni, cake);
-        assertEq(fresh.UNI_V3_FACTORY(),  uni);
-        assertEq(fresh.CAKE_V3_FACTORY(), cake);
+    function test_constructor_immutablesStored() public {
+        address uniV2 = makeAddr("uniV2");
+        address cakeV2 = makeAddr("cakeV2");
+        address uniV3 = makeAddr("uniV3");
+        address cakeV3 = makeAddr("cakeV3");
+        OneDex fresh = new OneDex(address(wbnb), address(mockPermit2), feeAddr,
+                                   uniV2, cakeV2, uniV3, cakeV3);
+        assertEq(fresh.UNI_V2_FACTORY(),  uniV2);
+        assertEq(fresh.CAKE_V2_FACTORY(), cakeV2);
+        assertEq(fresh.UNI_V3_FACTORY(),  uniV3);
+        assertEq(fresh.CAKE_V3_FACTORY(), cakeV3);
     }
 
-    // ── 24. Permit2 ───────────────────────────────────────────────────────────
+    // ── 22. Permit2 ───────────────────────────────────────────────────────────
 
     function test_permit2_standardSwap() public {
         uint256 amtIn  = 100 ether;
@@ -777,14 +788,13 @@ contract OneDexTest is Test {
         assertEq(recipient.balance - recipientBefore, netBnb);
     }
 
-    // ── 25. Aggregation fee ───────────────────────────────────────────────────
+    // ── 23. Aggregation fee ───────────────────────────────────────────────────
 
     function test_feeOnOutput_erc20() public {
         uint256 amtIn  = 100 ether;
-        uint256 amtOut = 100 ether; // router gives 100 tokenB
+        uint256 amtOut = 100 ether;
         tokenB.mint(address(router), amtOut);
 
-        // 0.5 % of 100 = 0.5 tokenB fee; user gets 99.5
         uint256 expectedFee  = _fee(amtOut);
         uint256 expectedUser = _net(amtOut);
 
@@ -804,9 +814,9 @@ contract OneDexTest is Test {
 
     function test_feeOnInput_erc20() public {
         uint256 amtIn    = 100 ether;
-        uint256 fee      = _fee(amtIn);    // 0.3 tokenA
-        uint256 swapIn   = amtIn - fee;    // 99.5 tokenA → steps
-        uint256 amtOut   = 90 ether;       // router gives 90 tokenB for 99.5 tokenA
+        uint256 fee      = _fee(amtIn);
+        uint256 swapIn   = amtIn - fee;
+        uint256 amtOut   = 90 ether;
         tokenB.mint(address(router), amtOut);
 
         Step memory step = _tokenSwapStep(address(tokenA), swapIn, address(tokenB), amtOut, amtOut);
@@ -884,11 +894,10 @@ contract OneDexTest is Test {
 
         Step memory step = _tokenSwapStep(address(tokenA), amtIn, address(tokenB), amtOut, amtOut);
 
-        // Demand more than the net output — should revert
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(InsufficientOutput.selector, netOut, amtOut));
         executor.execute(
-            address(tokenA), amtIn, address(tokenB), amtOut, // minAmountOut == gross, too high
+            address(tokenA), amtIn, address(tokenB), amtOut,
             recipient, MAX_DEADLINE, _encode(step, false)
         );
     }
@@ -917,15 +926,216 @@ contract OneDexTest is Test {
         assertEq(tokenB.balanceOf(recipient), netOut);
     }
 
-    // ── 26. V3 swap callbacks ─────────────────────────────────────────────────
+    // ── 24. _validateTarget — V2 pair path ────────────────────────────────────
 
-    function _deployWithFactories(address uniFactory, address cakeFactory) internal returns (OneDex) {
-        OneDex dex = new OneDex(address(wbnb), address(mockPermit2), feeAddr, uniFactory, cakeFactory);
-        return dex;
+    function test_v2Pair_uniV2Factory_validated() public {
+        MockV2Factory v2fac = new MockV2Factory();
+        MockV2Pair    pair  = new MockV2Pair(address(tokenA), address(tokenB));
+        v2fac.setPair(address(tokenA), address(tokenB), address(pair));
+
+        // Deploy executor with uniV2Factory
+        OneDex dex = new OneDex(address(wbnb), address(mockPermit2), feeAddr,
+                                 address(v2fac), address(0), address(0), address(0));
+
+        tokenB.mint(address(pair), 90 ether);
+
+        uint256 amtIn  = 100 ether;
+        uint256 amtOut = 90 ether;
+        uint256 netOut = _net(amtOut);
+
+        tokenA.mint(user, amtIn);
+        vm.prank(user);
+        tokenA.approve(address(dex), type(uint256).max);
+
+        Step memory step = Step({
+            target:           address(pair),
+            value:            0,
+            callData:         abi.encodeCall(pair.swap, (0, amtOut, address(dex), "")),
+            approveToken:     address(0),
+            approveAmt:       0,
+            preTransferToken: address(tokenA),
+            preTransferAmt:   amtIn,
+            tokenOut:         address(tokenB),
+            minDelta:         amtOut
+        });
+
+        vm.prank(user);
+        uint256 received = dex.execute(
+            address(tokenA), amtIn, address(tokenB), netOut,
+            recipient, MAX_DEADLINE, _encode(step)
+        );
+
+        assertEq(received, netOut);
+        assertEq(tokenB.balanceOf(recipient), netOut);
+        // tokenA was pre-transferred into pair (not via approve)
+        assertEq(tokenA.balanceOf(address(pair)), amtIn);
+        assertEq(tokenA.allowance(address(dex), address(pair)), 0);
     }
 
+    function test_v2Pair_cakeV2Factory_validated() public {
+        MockV2Factory cakeV2fac = new MockV2Factory();
+        MockV2Pair    pair      = new MockV2Pair(address(tokenA), address(tokenB));
+        cakeV2fac.setPair(address(tokenA), address(tokenB), address(pair));
+
+        OneDex dex = new OneDex(address(wbnb), address(mockPermit2), feeAddr,
+                                 address(0), address(cakeV2fac), address(0), address(0));
+
+        tokenB.mint(address(pair), 70 ether);
+        tokenA.mint(user, 80 ether);
+        vm.prank(user);
+        tokenA.approve(address(dex), type(uint256).max);
+
+        Step memory step = Step({
+            target:           address(pair),
+            value:            0,
+            callData:         abi.encodeCall(pair.swap, (0, 70 ether, address(dex), "")),
+            approveToken:     address(0),
+            approveAmt:       0,
+            preTransferToken: address(tokenA),
+            preTransferAmt:   80 ether,
+            tokenOut:         address(tokenB),
+            minDelta:         70 ether
+        });
+
+        vm.prank(user);
+        uint256 received = dex.execute(
+            address(tokenA), 80 ether, address(tokenB), _net(70 ether),
+            recipient, MAX_DEADLINE, _encode(step)
+        );
+
+        assertEq(received, _net(70 ether));
+    }
+
+    function test_v2Pair_wrongFactory_reverts() public {
+        MockV2Factory v2fac   = new MockV2Factory();
+        MockV2Pair    pair    = new MockV2Pair(address(tokenA), address(tokenB));
+        address       other   = makeAddr("other");
+        // Factory maps to a DIFFERENT address
+        v2fac.setPair(address(tokenA), address(tokenB), other);
+
+        OneDex dex = new OneDex(address(wbnb), address(mockPermit2), feeAddr,
+                                 address(v2fac), address(0), address(0), address(0));
+        tokenA.mint(user, 1);
+        vm.prank(user);
+        tokenA.approve(address(dex), type(uint256).max);
+
+        Step memory step = Step({
+            target:           address(pair),
+            value:            0,
+            callData:         hex"",
+            approveToken:     address(0),
+            approveAmt:       0,
+            preTransferToken: address(0),
+            preTransferAmt:   0,
+            tokenOut:         address(tokenB),
+            minDelta:         0
+        });
+
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(RouterNotWhitelisted.selector, address(pair)));
+        dex.execute(address(tokenA), 1, address(tokenB), 0, recipient, MAX_DEADLINE, _encode(step));
+    }
+
+    // ── 25. _validateTarget — V3 pool path ────────────────────────────────────
+
+    function test_v3Pool_uniV3Factory_validated() public {
+        MockV3Pool pool  = new MockV3Pool(address(tokenA), address(tokenB), 500);
+        MockV3Factory v3fac = new MockV3Factory();
+        v3fac.registerPool(address(tokenA), address(tokenB), 500, address(pool));
+
+        OneDex dex = new OneDex(address(wbnb), address(mockPermit2), feeAddr,
+                                 address(0), address(0), address(v3fac), address(0));
+
+        tokenB.mint(address(pool), 90 ether);
+        pool.prepareOutput(address(tokenB), 90 ether);
+        tokenA.mint(user, 100 ether);
+        vm.prank(user);
+        tokenA.approve(address(dex), type(uint256).max);
+
+        uint256 netOut = _net(90 ether);
+
+        Step memory step = Step({
+            target:           address(pool),
+            value:            0,
+            callData:         abi.encodeCall(pool.swap, (0, 90 ether, address(dex), "")),
+            approveToken:     address(0),
+            approveAmt:       0,
+            preTransferToken: address(tokenA),
+            preTransferAmt:   100 ether,
+            tokenOut:         address(tokenB),
+            minDelta:         90 ether
+        });
+
+        vm.prank(user);
+        uint256 received = dex.execute(
+            address(tokenA), 100 ether, address(tokenB), netOut,
+            recipient, MAX_DEADLINE, _encode(step)
+        );
+
+        assertEq(received, netOut);
+        assertEq(tokenB.balanceOf(recipient), netOut);
+    }
+
+    // ── 26. preTransfer mechanics ─────────────────────────────────────────────
+
+    function test_preTransfer_zero_skipped_approvalPathWorks() public {
+        // Existing approval-style step — preTransferAmt = 0 → skipped
+        uint256 amtIn  = 100 ether;
+        uint256 amtOut = 90 ether;
+        uint256 netOut = _net(amtOut);
+        Step memory step = _tokenSwapStep(address(tokenA), amtIn, address(tokenB), amtOut, amtOut);
+
+        vm.prank(user);
+        uint256 received = executor.execute(
+            address(tokenA), amtIn, address(tokenB), netOut, recipient, MAX_DEADLINE, _encode(step)
+        );
+        assertEq(received, netOut);
+        // Approval path was used (allowance reset to 0 after step)
+        assertEq(tokenA.allowance(address(executor), address(router)), 0);
+    }
+
+    function test_preTransfer_pushesTokensBeforeCall() public {
+        MockV2Factory v2fac = new MockV2Factory();
+        MockV2Pair    pair  = new MockV2Pair(address(tokenA), address(tokenB));
+        v2fac.setPair(address(tokenA), address(tokenB), address(pair));
+
+        OneDex dex = new OneDex(address(wbnb), address(mockPermit2), feeAddr,
+                                 address(v2fac), address(0), address(0), address(0));
+
+        uint256 preAmt = 80 ether;
+        uint256 outAmt = 75 ether;
+        tokenB.mint(address(pair), outAmt);
+        tokenA.mint(user, preAmt);
+        vm.prank(user);
+        tokenA.approve(address(dex), type(uint256).max);
+
+        Step memory step = Step({
+            target:           address(pair),
+            value:            0,
+            callData:         abi.encodeCall(pair.swap, (0, outAmt, address(dex), "")),
+            approveToken:     address(0),
+            approveAmt:       0,
+            preTransferToken: address(tokenA),
+            preTransferAmt:   preAmt,
+            tokenOut:         address(tokenB),
+            minDelta:         outAmt
+        });
+
+        vm.prank(user);
+        dex.execute(
+            address(tokenA), preAmt, address(tokenB), _net(outAmt),
+            recipient, MAX_DEADLINE, _encode(step)
+        );
+
+        // tokenA was pushed into pair, not approved
+        assertEq(tokenA.allowance(address(dex), address(pair)), 0);
+        assertEq(tokenA.balanceOf(address(pair)), preAmt);
+    }
+
+    // ── 27. V3 swap callbacks ─────────────────────────────────────────────────
+
     function test_v3Callback_disabledFactory_reverts() public {
-        // executor deployed with address(0) factories — callbacks should revert
+        // executor has address(0) for UNI_V3_FACTORY → uniswapV3SwapCallback must revert
         MockV3Pool pool = new MockV3Pool(address(tokenA), address(tokenB), 3000);
         bytes memory cbData = abi.encode(SwapCallbackData({
             tokenIn:  address(tokenA),
@@ -946,6 +1156,8 @@ contract OneDexTest is Test {
             payer:    address(executor)
         }));
 
+        // executor's CAKE_V3_FACTORY = testV3Factory, which maps (tokenA, tokenB, 2500) → address(0)
+        // so the pool won't be found → RouterNotWhitelisted
         vm.prank(address(pool));
         vm.expectRevert(abi.encodeWithSelector(RouterNotWhitelisted.selector, address(pool)));
         executor.pancakeV3SwapCallback(50 ether, 0, cbData);
@@ -953,10 +1165,11 @@ contract OneDexTest is Test {
 
     function test_v3Callback_validPool_pays() public {
         MockV3Pool pool = new MockV3Pool(address(tokenA), address(tokenB), 3000);
-        ConfigurableV3Factory factory = new ConfigurableV3Factory(address(pool));
+        ConfigurableV3Factory cbFactory = new ConfigurableV3Factory(address(pool));
 
-        OneDex dex = _deployWithFactories(address(factory), address(0));
-        // Fund dex with tokenA so it can pay
+        // Deploy fresh executor with UNI_V3_FACTORY = cbFactory
+        OneDex dex = new OneDex(address(wbnb), address(mockPermit2), feeAddr,
+                                 address(0), address(0), address(cbFactory), address(0));
         tokenA.mint(address(dex), 100 ether);
 
         uint256 poolBefore = tokenA.balanceOf(address(pool));
@@ -967,7 +1180,6 @@ contract OneDexTest is Test {
             payer:    address(dex)
         }));
 
-        // Pool triggers the callback on dex
         vm.prank(address(pool));
         dex.uniswapV3SwapCallback(100 ether, 0, cbData);
 
@@ -977,9 +1189,10 @@ contract OneDexTest is Test {
 
     function test_pancakeV3Callback_validPool_pays() public {
         MockV3Pool pool = new MockV3Pool(address(tokenA), address(tokenB), 500);
-        ConfigurableV3Factory factory = new ConfigurableV3Factory(address(pool));
+        ConfigurableV3Factory cbFactory = new ConfigurableV3Factory(address(pool));
 
-        OneDex dex = _deployWithFactories(address(0), address(factory));
+        OneDex dex = new OneDex(address(wbnb), address(mockPermit2), feeAddr,
+                                 address(0), address(0), address(0), address(cbFactory));
         tokenA.mint(address(dex), 50 ether);
 
         uint256 poolBefore = tokenA.balanceOf(address(pool));
@@ -997,12 +1210,12 @@ contract OneDexTest is Test {
     }
 
     function test_v3Callback_invalidPool_reverts() public {
-        // factory returns a different address — callback must revert
-        MockV3Pool pool    = new MockV3Pool(address(tokenA), address(tokenB), 3000);
-        address fakePool   = makeAddr("fakePool");
-        ConfigurableV3Factory factory = new ConfigurableV3Factory(fakePool); // returns fakePool, not pool
+        MockV3Pool pool  = new MockV3Pool(address(tokenA), address(tokenB), 3000);
+        address fakePool = makeAddr("fakePool");
+        ConfigurableV3Factory cbFactory = new ConfigurableV3Factory(fakePool); // returns fakePool, not pool
 
-        OneDex dex = _deployWithFactories(address(factory), address(0));
+        OneDex dex = new OneDex(address(wbnb), address(mockPermit2), feeAddr,
+                                 address(0), address(0), address(cbFactory), address(0));
         tokenA.mint(address(dex), 100 ether);
 
         bytes memory cbData = abi.encode(SwapCallbackData({
@@ -1011,7 +1224,6 @@ contract OneDexTest is Test {
             payer:    address(dex)
         }));
 
-        // msg.sender = pool, but factory returns fakePool → mismatch → revert
         vm.prank(address(pool));
         vm.expectRevert(abi.encodeWithSelector(RouterNotWhitelisted.selector, address(pool)));
         dex.uniswapV3SwapCallback(100 ether, 0, cbData);
@@ -1019,9 +1231,10 @@ contract OneDexTest is Test {
 
     function test_v3Callback_amount1DeltaPositive() public {
         MockV3Pool pool = new MockV3Pool(address(tokenA), address(tokenB), 3000);
-        ConfigurableV3Factory factory = new ConfigurableV3Factory(address(pool));
+        ConfigurableV3Factory cbFactory = new ConfigurableV3Factory(address(pool));
 
-        OneDex dex = _deployWithFactories(address(factory), address(0));
+        OneDex dex = new OneDex(address(wbnb), address(mockPermit2), feeAddr,
+                                 address(0), address(0), address(cbFactory), address(0));
         tokenA.mint(address(dex), 75 ether);
 
         uint256 poolBefore = tokenA.balanceOf(address(pool));
@@ -1032,7 +1245,6 @@ contract OneDexTest is Test {
             payer:    address(dex)
         }));
 
-        // amount0Delta = 0, amount1Delta = 75 ether positive — owed is amount1Delta
         vm.prank(address(pool));
         dex.uniswapV3SwapCallback(0, 75 ether, cbData);
 

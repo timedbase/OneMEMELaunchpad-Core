@@ -6,13 +6,27 @@ import {MockERC20} from "./MockERC20.sol";
 /**
  * @notice Configurable mock router for unit tests.
  *
+ * Exposes token0/token1/fee so _validateTarget treats it as a V3 pool.
+ * The test suite registers it in a MockV3Factory keyed by (token0, token1, fee).
+ *
  * Supports four swap modes:
- *   swapTokens       — ERC-20 in, ERC-20 out
+ *   swapTokens       — ERC-20 in, ERC-20 out   (approve/pull style — V3 router)
  *   swapTokensForBNB — ERC-20 in, native BNB out
- *   swapBNBForTokens — native BNB in, ERC-20 out  (payable)
+ *   swapBNBForTokens — native BNB in, ERC-20 out (payable)
  *   revertWith       — unconditionally revert (for revert-bubbling tests)
  */
 contract MockRouter {
+    // V3-pool identity fields so _validateTarget accepts this contract.
+    address public token0;
+    address public token1;
+    uint24  public fee;
+
+    constructor(address t0, address t1, uint24 fee_) {
+        token0 = t0;
+        token1 = t1;
+        fee    = fee_;
+    }
+
     receive() external payable {}
 
     /// @notice Pull `amountIn` tokenIn from caller, give `amountOut` tokenOut.
@@ -46,46 +60,42 @@ contract MockRouter {
     function revertWith(string calldata reason) external pure {
         revert(reason);
     }
-
-    /// @notice Revert with an encoded custom error — used for typed-error bubble tests.
-    function revertWithCustomError() external pure {
-        // Encode a fake custom error: MockError(uint256 code)
-        assembly {
-            // selector = keccak256("MockError(uint256)")[0:4]
-            let ptr := mload(0x40)
-            mstore(ptr,        0x1b6b3a6200000000000000000000000000000000000000000000000000000000)
-            mstore(add(ptr,4), 42)
-            revert(ptr, 36)
-        }
-    }
 }
 
 /**
- * @notice Mock router that attempts reentrancy into the executor on call.
- *         Used to verify the nonReentrant guard fires correctly.
+ * @notice Mock pool that attempts reentrancy into the executor when any swap is called.
+ *         Exposes token0/token1/fee so _validateTarget accepts it as a V3 pool.
+ *         Register it in MockV3Factory with a distinct (token0, token1, fee) triplet.
  */
-contract MockReentrantRouter {
-    address public executor;
-    bytes   public reentrantCall;
+contract ReentrantPool {
+    address public token0;
+    address public token1;
+    uint24  public fee;
 
-    constructor(address executor_, bytes memory reentrantCall_) {
-        executor     = executor_;
-        reentrantCall = reentrantCall_;
+    address private _executor;
+    bytes   private _reentrantCall;
+
+    constructor(address t0, address t1, uint24 fee_, address executor_, bytes memory reentrantCall_) {
+        token0        = t0;
+        token1        = t1;
+        fee           = fee_;
+        _executor     = executor_;
+        _reentrantCall = reentrantCall_;
     }
 
+    /// @dev Any unrecognised call (including the swap calldata) triggers the fallback,
+    ///      which attempts reentrancy. The nonReentrant guard must reject it (ok == false).
     fallback() external payable {
-        // Attempt to re-enter the executor
-        (bool ok,) = executor.call(reentrantCall);
-        // We expect this to fail with Reentrancy — propagate the result
-        require(!ok, "MockReentrantRouter: reentrancy should have failed");
+        (bool ok,) = _executor.call(_reentrantCall);
+        require(!ok, "ReentrantPool: reentrancy should have been blocked");
     }
 
     receive() external payable {}
 }
 
 /**
- * @notice Mock router that is intentionally NOT whitelisted.
- *         Any call to it should revert at the whitelist gate.
+ * @notice Mock target that does NOT implement token0() / token1().
+ *         Any attempt to route through it must revert at _validateTarget.
  */
 contract MockUnwhitelistedRouter {
     function doSomething() external pure returns (uint256) {

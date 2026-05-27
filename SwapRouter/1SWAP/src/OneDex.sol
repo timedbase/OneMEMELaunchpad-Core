@@ -5,6 +5,8 @@ pragma solidity ^0.8.24;
 
 import {SafeTransfer}  from "./libraries/SafeTransfer.sol";
 import {IPermit2}      from "./interfaces/IPermit2.sol";
+import {IUniV2Factory} from "./interfaces/IUniV2Factory.sol";
+import {IUniV2Pair}    from "./interfaces/IUniV2Pair.sol";
 import {IUniV3Factory} from "./interfaces/IUniV3Factory.sol";
 import {IUniV3Pool}    from "./interfaces/IUniV3Pool.sol";
 
@@ -19,8 +21,10 @@ struct Step {
     address target;
     uint256 value;
     bytes   callData;
-    address approveToken;
+    address approveToken;      // approve before calling target (V3 pool style)
     uint256 approveAmt;
+    address preTransferToken;  // transfer into target before calling (V2 pair style)
+    uint256 preTransferAmt;    // 0 = skip
     address tokenOut;
     uint256 minDelta;
 }
@@ -48,8 +52,6 @@ event Swapped(
 );
 event FeeCollected(address indexed token, uint256 amount);
 event FeeRecipientUpdated(address indexed recipient);
-event TargetAdded(address indexed target);
-event TargetRemoved(address indexed target);
 event ExecutorPaused(address indexed by);
 event ExecutorUnpaused(address indexed by);
 event OwnershipTransferInitiated(address indexed proposed);
@@ -71,10 +73,10 @@ contract OneDex {
 
     address public immutable WBNB;
     address public immutable PERMIT2;
+    address public immutable UNI_V2_FACTORY;
+    address public immutable CAKE_V2_FACTORY;
     address public immutable UNI_V3_FACTORY;
     address public immutable CAKE_V3_FACTORY;
-
-    mapping(address => bool) public allowedTargets;
 
     modifier nonReentrant() {
         if (_status == _ENTERED) revert Reentrancy();
@@ -97,12 +99,16 @@ contract OneDex {
         address wbnb_,
         address permit2_,
         address feeRecipient_,
+        address uniV2Factory_,
+        address cakeV2Factory_,
         address uniV3Factory_,
         address cakeV3Factory_
     ) {
         if (wbnb_ == address(0) || permit2_ == address(0) || feeRecipient_ == address(0)) revert ZeroAddress();
         WBNB            = wbnb_;
         PERMIT2         = permit2_;
+        UNI_V2_FACTORY  = uniV2Factory_;
+        CAKE_V2_FACTORY = cakeV2Factory_;
         UNI_V3_FACTORY  = uniV3Factory_;
         CAKE_V3_FACTORY = cakeV3Factory_;
         owner           = msg.sender;
@@ -192,7 +198,6 @@ contract OneDex {
         uint256 n = steps.length;
         if (n == 0) revert EmptyRoute();
 
-        // Fee on input: deducted before steps so the off-chain route sees the reduced amount.
         if (feeOnInput) _collectFee(tokenIn, actualIn);
 
         _executeSteps(steps, n);
@@ -201,7 +206,6 @@ contract OneDex {
             ? address(this).balance
             : SafeTransfer.balanceOf(tokenOut, address(this));
 
-        // Fee on output: deducted from gross output; minAmountOut is checked against net.
         if (!feeOnInput) amountOut -= _collectFee(tokenOut, amountOut);
 
         if (amountOut < minAmountOut) revert InsufficientOutput(amountOut, minAmountOut);
@@ -216,16 +220,57 @@ contract OneDex {
         emit FeeCollected(token, fee);
     }
 
+    /// @dev Reverts if `target` is not a canonical V2 pair or V3 pool
+    ///      from one of the four trusted factory immutables.
+    ///
+    /// Logic:
+    ///   1. Call target.token0()  — succeeds on both V2 pairs and V3 pools.
+    ///   2. Call target.fee()     — only V3 pools have this; reverts on V2 pairs.
+    ///   3. Use the result to route to the correct factory type.
+    ///   4. Ask the factory if it recognises this address as its own pair/pool.
+    function _validateTarget(address target) internal view {
+        address t0;
+        address t1;
+
+        try IUniV2Pair(target).token0() returns (address _t0) {
+            t0 = _t0;
+        } catch {
+            revert RouterNotWhitelisted(target);
+        }
+        t1 = IUniV2Pair(target).token1();
+
+        try IUniV3Pool(target).fee() returns (uint24 fee) {
+            // ── V3 pool path ──────────────────────────────────────────────────
+            if (UNI_V3_FACTORY  != address(0) &&
+                IUniV3Factory(UNI_V3_FACTORY).getPool(t0, t1, fee)  == target) return;
+            if (CAKE_V3_FACTORY != address(0) &&
+                IUniV3Factory(CAKE_V3_FACTORY).getPool(t0, t1, fee) == target) return;
+        } catch {
+            // ── V2 pair path ──────────────────────────────────────────────────
+            if (UNI_V2_FACTORY  != address(0) &&
+                IUniV2Factory(UNI_V2_FACTORY).getPair(t0, t1)  == target) return;
+            if (CAKE_V2_FACTORY != address(0) &&
+                IUniV2Factory(CAKE_V2_FACTORY).getPair(t0, t1) == target) return;
+        }
+
+        revert RouterNotWhitelisted(target);
+    }
+
     function _executeSteps(Step[] memory steps, uint256 n) internal {
         for (uint256 i; i < n; ) {
             Step memory step = steps[i];
 
-            if (!allowedTargets[step.target]) revert RouterNotWhitelisted(step.target);
+            _validateTarget(step.target);
 
-            // USDT-safe: zero → amount
+            // V3 pool style: approve target to pull tokens. USDT-safe: zero → amount.
             if (step.approveToken != address(0)) {
                 SafeTransfer.safeApprove(step.approveToken, step.target, 0);
                 SafeTransfer.safeApprove(step.approveToken, step.target, step.approveAmt);
+            }
+
+            // V2 pair style: push tokens into pair before calling swap().
+            if (step.preTransferToken != address(0) && step.preTransferAmt > 0) {
+                SafeTransfer.safeTransfer(step.preTransferToken, step.target, step.preTransferAmt);
             }
 
             uint256 snapBefore = step.tokenOut == address(0)
@@ -258,23 +303,27 @@ contract OneDex {
         }
     }
 
+    function _deliver(address token, address to, uint256 amount) internal {
+        if (token == address(0)) {
+            (bool ok,) = to.call{value: amount}("");
+            if (!ok) revert NativeSendFailed();
+        } else {
+            SafeTransfer.safeTransfer(token, to, amount);
+        }
+    }
+
     // ── V3 swap callbacks ─────────────────────────────────────────────────────
 
-    /// @dev Shared handler for Uniswap V3 and PancakeSwap V3 pool callbacks.
-    ///      Validates that msg.sender is a pool registered in the given factory
-    ///      before transferring tokenIn to the pool.
     function _handleV3Callback(
         int256  amount0Delta,
         int256  amount1Delta,
         bytes calldata data,
         address factory
     ) internal {
-        // If factory is address(0), this callback type is disabled.
         if (factory == address(0)) revert RouterNotWhitelisted(msg.sender);
 
         SwapCallbackData memory decoded = abi.decode(data, (SwapCallbackData));
 
-        // Resolve which side the pool expects to be paid.
         address pool = IUniV3Factory(factory).getPool(
             IUniV3Pool(msg.sender).token0(),
             IUniV3Pool(msg.sender).token1(),
@@ -282,8 +331,6 @@ contract OneDex {
         );
         if (msg.sender != pool || pool == address(0)) revert RouterNotWhitelisted(msg.sender);
 
-        // Determine how much is owed: whichever delta is positive is the amount
-        // the pool expects to receive.
         uint256 amountOwed = amount0Delta > 0
             ? uint256(amount0Delta)
             : uint256(amount1Delta);
@@ -307,44 +354,12 @@ contract OneDex {
         _handleV3Callback(amount0Delta, amount1Delta, data, CAKE_V3_FACTORY);
     }
 
-    function _deliver(address token, address to, uint256 amount) internal {
-        if (token == address(0)) {
-            (bool ok,) = to.call{value: amount}("");
-            if (!ok) revert NativeSendFailed();
-        } else {
-            SafeTransfer.safeTransfer(token, to, amount);
-        }
-    }
-
     // ── Fee management ────────────────────────────────────────────────────────
 
     function setFeeRecipient(address recipient_) external onlyOwner {
         if (recipient_ == address(0)) revert ZeroAddress();
         feeRecipient = recipient_;
         emit FeeRecipientUpdated(recipient_);
-    }
-
-    // ── Target whitelist ──────────────────────────────────────────────────────
-
-    function addTarget(address target) external onlyOwner {
-        if (target == address(0)) revert ZeroAddress();
-        allowedTargets[target] = true;
-        emit TargetAdded(target);
-    }
-
-    function addTargets(address[] calldata targets) external onlyOwner {
-        uint256 len = targets.length;
-        for (uint256 i; i < len; ) {
-            if (targets[i] == address(0)) revert ZeroAddress();
-            allowedTargets[targets[i]] = true;
-            emit TargetAdded(targets[i]);
-            unchecked { ++i; }
-        }
-    }
-
-    function removeTarget(address target) external onlyOwner {
-        allowedTargets[target] = false;
-        emit TargetRemoved(target);
     }
 
     // ── Pause ─────────────────────────────────────────────────────────────────
