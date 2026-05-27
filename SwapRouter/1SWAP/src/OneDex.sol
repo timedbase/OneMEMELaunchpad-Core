@@ -3,8 +3,17 @@ pragma solidity ^0.8.24;
 
 /// @title 1Dex — Aggregation Executor
 
-import {SafeTransfer} from "./libraries/SafeTransfer.sol";
-import {IPermit2}     from "./interfaces/IPermit2.sol";
+import {SafeTransfer}  from "./libraries/SafeTransfer.sol";
+import {IPermit2}      from "./interfaces/IPermit2.sol";
+import {IUniV3Factory} from "./interfaces/IUniV3Factory.sol";
+import {IUniV3Pool}    from "./interfaces/IUniV3Pool.sol";
+
+/// @dev Passed as `data` in every V3 swap call so the callback can pay the pool.
+struct SwapCallbackData {
+    address tokenIn;
+    uint256 amountIn;
+    address payer;   // always address(this) — OneDex holds the tokens
+}
 
 struct Step {
     address target;
@@ -62,6 +71,8 @@ contract OneDex {
 
     address public immutable WBNB;
     address public immutable PERMIT2;
+    address public immutable UNI_V3_FACTORY;
+    address public immutable CAKE_V3_FACTORY;
 
     mapping(address => bool) public allowedTargets;
 
@@ -82,12 +93,20 @@ contract OneDex {
         _;
     }
 
-    constructor(address wbnb_, address permit2_, address feeRecipient_) {
+    constructor(
+        address wbnb_,
+        address permit2_,
+        address feeRecipient_,
+        address uniV3Factory_,
+        address cakeV3Factory_
+    ) {
         if (wbnb_ == address(0) || permit2_ == address(0) || feeRecipient_ == address(0)) revert ZeroAddress();
-        WBNB         = wbnb_;
-        PERMIT2      = permit2_;
-        owner        = msg.sender;
-        feeRecipient = feeRecipient_;
+        WBNB            = wbnb_;
+        PERMIT2         = permit2_;
+        UNI_V3_FACTORY  = uniV3Factory_;
+        CAKE_V3_FACTORY = cakeV3Factory_;
+        owner           = msg.sender;
+        feeRecipient    = feeRecipient_;
     }
 
     receive() external payable {}
@@ -237,6 +256,55 @@ contract OneDex {
 
             unchecked { ++i; }
         }
+    }
+
+    // ── V3 swap callbacks ─────────────────────────────────────────────────────
+
+    /// @dev Shared handler for Uniswap V3 and PancakeSwap V3 pool callbacks.
+    ///      Validates that msg.sender is a pool registered in the given factory
+    ///      before transferring tokenIn to the pool.
+    function _handleV3Callback(
+        int256  amount0Delta,
+        int256  amount1Delta,
+        bytes calldata data,
+        address factory
+    ) internal {
+        // If factory is address(0), this callback type is disabled.
+        if (factory == address(0)) revert RouterNotWhitelisted(msg.sender);
+
+        SwapCallbackData memory decoded = abi.decode(data, (SwapCallbackData));
+
+        // Resolve which side the pool expects to be paid.
+        address pool = IUniV3Factory(factory).getPool(
+            IUniV3Pool(msg.sender).token0(),
+            IUniV3Pool(msg.sender).token1(),
+            IUniV3Pool(msg.sender).fee()
+        );
+        if (msg.sender != pool || pool == address(0)) revert RouterNotWhitelisted(msg.sender);
+
+        // Determine how much is owed: whichever delta is positive is the amount
+        // the pool expects to receive.
+        uint256 amountOwed = amount0Delta > 0
+            ? uint256(amount0Delta)
+            : uint256(amount1Delta);
+
+        SafeTransfer.safeTransfer(decoded.tokenIn, msg.sender, amountOwed);
+    }
+
+    function uniswapV3SwapCallback(
+        int256 amount0Delta,
+        int256 amount1Delta,
+        bytes calldata data
+    ) external {
+        _handleV3Callback(amount0Delta, amount1Delta, data, UNI_V3_FACTORY);
+    }
+
+    function pancakeV3SwapCallback(
+        int256 amount0Delta,
+        int256 amount1Delta,
+        bytes calldata data
+    ) external {
+        _handleV3Callback(amount0Delta, amount1Delta, data, CAKE_V3_FACTORY);
     }
 
     function _deliver(address token, address to, uint256 amount) internal {

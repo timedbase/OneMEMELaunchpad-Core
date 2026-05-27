@@ -24,6 +24,9 @@ import {MockRouter,
         MockReentrantRouter,
         MockUnwhitelistedRouter} from "./mocks/MockRouter.sol";
 import {MockPermit2}           from "./mocks/MockPermit2.sol";
+import {MockV3Pool,
+        ConfigurableV3Factory} from "./mocks/MockV3Pool.sol";
+import {SwapCallbackData}      from "../src/OneDex.sol";
 
 contract OneDexTest is Test {
 
@@ -49,7 +52,7 @@ contract OneDexTest is Test {
     function setUp() public {
         wbnb        = new MockERC20("Wrapped BNB", "WBNB", 18);
         mockPermit2 = new MockPermit2();
-        executor    = new OneDex(address(wbnb), address(mockPermit2), feeAddr);
+        executor    = new OneDex(address(wbnb), address(mockPermit2), feeAddr, address(0), address(0));
         router      = new MockRouter();
 
         tokenA   = new MockERC20("Token A", "TKA", 18);
@@ -617,22 +620,30 @@ contract OneDexTest is Test {
 
     function test_constructor_zeroWBNB_reverts() public {
         vm.expectRevert(ZeroAddress.selector);
-        new OneDex(address(0), address(mockPermit2), feeAddr);
+        new OneDex(address(0), address(mockPermit2), feeAddr, address(0), address(0));
     }
 
     function test_constructor_zeroPermit2_reverts() public {
         vm.expectRevert(ZeroAddress.selector);
-        new OneDex(address(wbnb), address(0), feeAddr);
+        new OneDex(address(wbnb), address(0), feeAddr, address(0), address(0));
     }
 
     function test_constructor_zeroFeeRecipient_reverts() public {
         vm.expectRevert(ZeroAddress.selector);
-        new OneDex(address(wbnb), address(mockPermit2), address(0));
+        new OneDex(address(wbnb), address(mockPermit2), address(0), address(0), address(0));
     }
 
     function test_constructor_ownerIsDeployer() public {
-        OneDex fresh = new OneDex(address(wbnb), address(mockPermit2), feeAddr);
+        OneDex fresh = new OneDex(address(wbnb), address(mockPermit2), feeAddr, address(0), address(0));
         assertEq(fresh.owner(), address(this));
+    }
+
+    function test_constructor_factoryAddressesStored() public {
+        address uni  = makeAddr("uniFactory");
+        address cake = makeAddr("cakeFactory");
+        OneDex fresh = new OneDex(address(wbnb), address(mockPermit2), feeAddr, uni, cake);
+        assertEq(fresh.UNI_V3_FACTORY(),  uni);
+        assertEq(fresh.CAKE_V3_FACTORY(), cake);
     }
 
     // ── 24. Permit2 ───────────────────────────────────────────────────────────
@@ -904,5 +915,127 @@ contract OneDexTest is Test {
         assertEq(received, netOut);
         assertEq(tokenB.balanceOf(feeAddr), fee);
         assertEq(tokenB.balanceOf(recipient), netOut);
+    }
+
+    // ── 26. V3 swap callbacks ─────────────────────────────────────────────────
+
+    function _deployWithFactories(address uniFactory, address cakeFactory) internal returns (OneDex) {
+        OneDex dex = new OneDex(address(wbnb), address(mockPermit2), feeAddr, uniFactory, cakeFactory);
+        return dex;
+    }
+
+    function test_v3Callback_disabledFactory_reverts() public {
+        // executor deployed with address(0) factories — callbacks should revert
+        MockV3Pool pool = new MockV3Pool(address(tokenA), address(tokenB), 3000);
+        bytes memory cbData = abi.encode(SwapCallbackData({
+            tokenIn:  address(tokenA),
+            amountIn: 100 ether,
+            payer:    address(executor)
+        }));
+
+        vm.prank(address(pool));
+        vm.expectRevert(abi.encodeWithSelector(RouterNotWhitelisted.selector, address(pool)));
+        executor.uniswapV3SwapCallback(100 ether, 0, cbData);
+    }
+
+    function test_pancakeV3Callback_disabledFactory_reverts() public {
+        MockV3Pool pool = new MockV3Pool(address(tokenA), address(tokenB), 2500);
+        bytes memory cbData = abi.encode(SwapCallbackData({
+            tokenIn:  address(tokenA),
+            amountIn: 50 ether,
+            payer:    address(executor)
+        }));
+
+        vm.prank(address(pool));
+        vm.expectRevert(abi.encodeWithSelector(RouterNotWhitelisted.selector, address(pool)));
+        executor.pancakeV3SwapCallback(50 ether, 0, cbData);
+    }
+
+    function test_v3Callback_validPool_pays() public {
+        MockV3Pool pool = new MockV3Pool(address(tokenA), address(tokenB), 3000);
+        ConfigurableV3Factory factory = new ConfigurableV3Factory(address(pool));
+
+        OneDex dex = _deployWithFactories(address(factory), address(0));
+        // Fund dex with tokenA so it can pay
+        tokenA.mint(address(dex), 100 ether);
+
+        uint256 poolBefore = tokenA.balanceOf(address(pool));
+
+        bytes memory cbData = abi.encode(SwapCallbackData({
+            tokenIn:  address(tokenA),
+            amountIn: 100 ether,
+            payer:    address(dex)
+        }));
+
+        // Pool triggers the callback on dex
+        vm.prank(address(pool));
+        dex.uniswapV3SwapCallback(100 ether, 0, cbData);
+
+        assertEq(tokenA.balanceOf(address(pool)) - poolBefore, 100 ether);
+        assertEq(tokenA.balanceOf(address(dex)), 0);
+    }
+
+    function test_pancakeV3Callback_validPool_pays() public {
+        MockV3Pool pool = new MockV3Pool(address(tokenA), address(tokenB), 500);
+        ConfigurableV3Factory factory = new ConfigurableV3Factory(address(pool));
+
+        OneDex dex = _deployWithFactories(address(0), address(factory));
+        tokenA.mint(address(dex), 50 ether);
+
+        uint256 poolBefore = tokenA.balanceOf(address(pool));
+
+        bytes memory cbData = abi.encode(SwapCallbackData({
+            tokenIn:  address(tokenA),
+            amountIn: 50 ether,
+            payer:    address(dex)
+        }));
+
+        vm.prank(address(pool));
+        dex.pancakeV3SwapCallback(50 ether, 0, cbData);
+
+        assertEq(tokenA.balanceOf(address(pool)) - poolBefore, 50 ether);
+    }
+
+    function test_v3Callback_invalidPool_reverts() public {
+        // factory returns a different address — callback must revert
+        MockV3Pool pool    = new MockV3Pool(address(tokenA), address(tokenB), 3000);
+        address fakePool   = makeAddr("fakePool");
+        ConfigurableV3Factory factory = new ConfigurableV3Factory(fakePool); // returns fakePool, not pool
+
+        OneDex dex = _deployWithFactories(address(factory), address(0));
+        tokenA.mint(address(dex), 100 ether);
+
+        bytes memory cbData = abi.encode(SwapCallbackData({
+            tokenIn:  address(tokenA),
+            amountIn: 100 ether,
+            payer:    address(dex)
+        }));
+
+        // msg.sender = pool, but factory returns fakePool → mismatch → revert
+        vm.prank(address(pool));
+        vm.expectRevert(abi.encodeWithSelector(RouterNotWhitelisted.selector, address(pool)));
+        dex.uniswapV3SwapCallback(100 ether, 0, cbData);
+    }
+
+    function test_v3Callback_amount1DeltaPositive() public {
+        MockV3Pool pool = new MockV3Pool(address(tokenA), address(tokenB), 3000);
+        ConfigurableV3Factory factory = new ConfigurableV3Factory(address(pool));
+
+        OneDex dex = _deployWithFactories(address(factory), address(0));
+        tokenA.mint(address(dex), 75 ether);
+
+        uint256 poolBefore = tokenA.balanceOf(address(pool));
+
+        bytes memory cbData = abi.encode(SwapCallbackData({
+            tokenIn:  address(tokenA),
+            amountIn: 75 ether,
+            payer:    address(dex)
+        }));
+
+        // amount0Delta = 0, amount1Delta = 75 ether positive — owed is amount1Delta
+        vm.prank(address(pool));
+        dex.uniswapV3SwapCallback(0, 75 ether, cbData);
+
+        assertEq(tokenA.balanceOf(address(pool)) - poolBefore, 75 ether);
     }
 }
