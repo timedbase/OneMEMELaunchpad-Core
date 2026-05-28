@@ -3,12 +3,8 @@ pragma solidity ^0.8.24;
 
 /// @title 1Dex — Aggregation Executor
 
-import {SafeTransfer}  from "./libraries/SafeTransfer.sol";
-import {IPermit2}      from "./interfaces/IPermit2.sol";
-import {IUniV2Factory} from "./interfaces/IUniV2Factory.sol";
-import {IUniV2Pair}    from "./interfaces/IUniV2Pair.sol";
-import {IUniV3Factory} from "./interfaces/IUniV3Factory.sol";
-import {IUniV3Pool}    from "./interfaces/IUniV3Pool.sol";
+import {SafeTransfer} from "./libraries/SafeTransfer.sol";
+import {IPermit2}     from "./interfaces/IPermit2.sol";
 
 /// @dev Passed as `data` in every V3 swap call so the callback can pay the pool.
 struct SwapCallbackData {
@@ -37,7 +33,6 @@ error ZeroAddress();
 error ZeroAmount();
 error EmptyRoute();
 error DeadlineExpired();
-error RouterNotWhitelisted(address target);
 error InsufficientOutput(uint256 actual, uint256 minimum);
 error NativeSendFailed();
 error NativeNotPermitted();
@@ -73,10 +68,6 @@ contract OneDex {
 
     address public immutable WBNB;
     address public immutable PERMIT2;
-    address public immutable UNI_V2_FACTORY;
-    address public immutable CAKE_V2_FACTORY;
-    address public immutable UNI_V3_FACTORY;
-    address public immutable CAKE_V3_FACTORY;
 
     modifier nonReentrant() {
         if (_status == _ENTERED) revert Reentrancy();
@@ -98,21 +89,13 @@ contract OneDex {
     constructor(
         address wbnb_,
         address permit2_,
-        address feeRecipient_,
-        address uniV2Factory_,
-        address cakeV2Factory_,
-        address uniV3Factory_,
-        address cakeV3Factory_
+        address feeRecipient_
     ) {
         if (wbnb_ == address(0) || permit2_ == address(0) || feeRecipient_ == address(0)) revert ZeroAddress();
-        WBNB            = wbnb_;
-        PERMIT2         = permit2_;
-        UNI_V2_FACTORY  = uniV2Factory_;
-        CAKE_V2_FACTORY = cakeV2Factory_;
-        UNI_V3_FACTORY  = uniV3Factory_;
-        CAKE_V3_FACTORY = cakeV3Factory_;
-        owner           = msg.sender;
-        feeRecipient    = feeRecipient_;
+        WBNB         = wbnb_;
+        PERMIT2      = permit2_;
+        owner        = msg.sender;
+        feeRecipient = feeRecipient_;
     }
 
     receive() external payable {}
@@ -220,47 +203,9 @@ contract OneDex {
         emit FeeCollected(token, fee);
     }
 
-    /// @dev Reverts if `target` is not a canonical V2 pair or V3 pool
-    ///      from one of the four trusted factory immutables.
-    ///
-    /// Logic:
-    ///   1. Call target.token0()  — succeeds on both V2 pairs and V3 pools.
-    ///   2. Call target.fee()     — only V3 pools have this; reverts on V2 pairs.
-    ///   3. Use the result to route to the correct factory type.
-    ///   4. Ask the factory if it recognises this address as its own pair/pool.
-    function _validateTarget(address target) internal view {
-        address t0;
-        address t1;
-
-        try IUniV2Pair(target).token0() returns (address _t0) {
-            t0 = _t0;
-        } catch {
-            revert RouterNotWhitelisted(target);
-        }
-        t1 = IUniV2Pair(target).token1();
-
-        try IUniV3Pool(target).fee() returns (uint24 fee) {
-            // ── V3 pool path ──────────────────────────────────────────────────
-            if (UNI_V3_FACTORY  != address(0) &&
-                IUniV3Factory(UNI_V3_FACTORY).getPool(t0, t1, fee)  == target) return;
-            if (CAKE_V3_FACTORY != address(0) &&
-                IUniV3Factory(CAKE_V3_FACTORY).getPool(t0, t1, fee) == target) return;
-        } catch {
-            // ── V2 pair path ──────────────────────────────────────────────────
-            if (UNI_V2_FACTORY  != address(0) &&
-                IUniV2Factory(UNI_V2_FACTORY).getPair(t0, t1)  == target) return;
-            if (CAKE_V2_FACTORY != address(0) &&
-                IUniV2Factory(CAKE_V2_FACTORY).getPair(t0, t1) == target) return;
-        }
-
-        revert RouterNotWhitelisted(target);
-    }
-
     function _executeSteps(Step[] memory steps, uint256 n) internal {
         for (uint256 i; i < n; ) {
             Step memory step = steps[i];
-
-            _validateTarget(step.target);
 
             // V3 pool style: approve target to pull tokens. USDT-safe: zero → amount.
             if (step.approveToken != address(0)) {
@@ -314,28 +259,10 @@ contract OneDex {
 
     // ── V3 swap callbacks ─────────────────────────────────────────────────────
 
-    function _handleV3Callback(
-        int256  amount0Delta,
-        int256  amount1Delta,
-        bytes calldata data,
-        address factory
-    ) internal {
-        if (factory == address(0)) revert RouterNotWhitelisted(msg.sender);
-
-        SwapCallbackData memory decoded = abi.decode(data, (SwapCallbackData));
-
-        address pool = IUniV3Factory(factory).getPool(
-            IUniV3Pool(msg.sender).token0(),
-            IUniV3Pool(msg.sender).token1(),
-            IUniV3Pool(msg.sender).fee()
-        );
-        if (msg.sender != pool || pool == address(0)) revert RouterNotWhitelisted(msg.sender);
-
-        uint256 amountOwed = amount0Delta > 0
-            ? uint256(amount0Delta)
-            : uint256(amount1Delta);
-
-        SafeTransfer.safeTransfer(decoded.tokenIn, msg.sender, amountOwed);
+    function _handleV3Callback(int256 amt0, int256 amt1, bytes calldata data) internal {
+        SwapCallbackData memory d = abi.decode(data, (SwapCallbackData));
+        uint256 owed = amt0 > 0 ? uint256(amt0) : uint256(amt1);
+        SafeTransfer.safeTransfer(d.tokenIn, msg.sender, owed);
     }
 
     function uniswapV3SwapCallback(
@@ -343,7 +270,7 @@ contract OneDex {
         int256 amount1Delta,
         bytes calldata data
     ) external {
-        _handleV3Callback(amount0Delta, amount1Delta, data, UNI_V3_FACTORY);
+        _handleV3Callback(amount0Delta, amount1Delta, data);
     }
 
     function pancakeV3SwapCallback(
@@ -351,7 +278,7 @@ contract OneDex {
         int256 amount1Delta,
         bytes calldata data
     ) external {
-        _handleV3Callback(amount0Delta, amount1Delta, data, CAKE_V3_FACTORY);
+        _handleV3Callback(amount0Delta, amount1Delta, data);
     }
 
     // ── Fee management ────────────────────────────────────────────────────────
