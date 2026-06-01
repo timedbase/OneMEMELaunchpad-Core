@@ -17,10 +17,12 @@ struct Step {
     address target;
     uint256 value;
     bytes   callData;
-    address approveToken;      // approve before calling target (V3 pool style)
+    address approveToken;         // approve before calling target (V3 pool style)
     uint256 approveAmt;
-    address preTransferToken;  // transfer into target before calling (V2 pair style)
-    uint256 preTransferAmt;    // 0 = skip
+    address preTransferToken;     // transfer into target before calling (V2 pair style)
+    uint256 preTransferAmt;       // 0 = skip
+    address pullFromSenderToken;  // OneDex calls transferFrom(originalSender, target, amt)
+    uint256 pullFromSenderAmt;    // 0 = skip
     address tokenOut;
     uint256 minDelta;
 }
@@ -45,8 +47,6 @@ event Swapped(
     uint256         amountOut,
     address         recipient
 );
-event FeeCollected(address indexed token, uint256 amount);
-event FeeRecipientUpdated(address indexed recipient);
 event ExecutorPaused(address indexed by);
 event ExecutorUnpaused(address indexed by);
 event OwnershipTransferInitiated(address indexed proposed);
@@ -59,11 +59,8 @@ contract OneDex {
     uint256 private constant _ENTERED     = 2;
     uint256 private _status = _NOT_ENTERED;
 
-    uint256 public constant FEE_BPS = 30; // 0.3 %
-
     address public owner;
     address public pendingOwner;
-    address public feeRecipient;
     bool    private _isPaused;
 
     address public immutable WBNB;
@@ -88,14 +85,12 @@ contract OneDex {
 
     constructor(
         address wbnb_,
-        address permit2_,
-        address feeRecipient_
+        address permit2_
     ) {
-        if (wbnb_ == address(0) || permit2_ == address(0) || feeRecipient_ == address(0)) revert ZeroAddress();
-        WBNB         = wbnb_;
-        PERMIT2      = permit2_;
-        owner        = msg.sender;
-        feeRecipient = feeRecipient_;
+        if (wbnb_ == address(0) || permit2_ == address(0)) revert ZeroAddress();
+        WBNB    = wbnb_;
+        PERMIT2 = permit2_;
+        owner   = msg.sender;
     }
 
     receive() external payable {}
@@ -114,18 +109,22 @@ contract OneDex {
         if (block.timestamp > deadline) revert DeadlineExpired();
         if (recipient == address(0))    revert ZeroAddress();
 
+        address _originalSender = msg.sender;
+
         uint256 actualIn;
         if (tokenIn == address(0)) {
             actualIn = msg.value;
             if (actualIn == 0) revert ZeroAmount();
-        } else {
+        } else if (amountIn > 0) {
+            // Standard pull: tokenIn flows user → OneDex
             uint256 before = SafeTransfer.balanceOf(tokenIn, address(this));
             SafeTransfer.safeTransferFrom(tokenIn, msg.sender, address(this), amountIn);
             actualIn = SafeTransfer.balanceOf(tokenIn, address(this)) - before;
             if (actualIn == 0) revert ZeroAmount();
         }
+        // amountIn == 0 with ERC-20 tokenIn: steps handle all token movement
 
-        amountOut = _swap(tokenIn, actualIn, tokenOut, minAmountOut, recipient, executionData);
+        amountOut = _swap(tokenIn, actualIn, tokenOut, minAmountOut, recipient, _originalSender, executionData);
         emit Swapped(msg.sender, tokenIn, tokenOut, actualIn, amountOut, recipient);
     }
 
@@ -144,9 +143,10 @@ contract OneDex {
         if (recipient == address(0))    revert ZeroAddress();
         if (tokenIn   == address(0))    revert NativeNotPermitted();
 
+        address _originalSender = msg.sender;
         uint256 actualIn = _pullPermit2(tokenIn, amountIn, permit, signature);
 
-        amountOut = _swap(tokenIn, actualIn, tokenOut, minAmountOut, recipient, executionData);
+        amountOut = _swap(tokenIn, actualIn, tokenOut, minAmountOut, recipient, _originalSender, executionData);
         emit Swapped(msg.sender, tokenIn, tokenOut, actualIn, amountOut, recipient);
     }
 
@@ -175,50 +175,38 @@ contract OneDex {
         address tokenOut,
         uint256 minAmountOut,
         address recipient,
+        address originalSender,
         bytes calldata executionData
     ) internal returns (uint256 amountOut) {
-        (bool feeOnInput, Step[] memory steps) = abi.decode(executionData, (bool, Step[]));
+        Step[] memory steps = abi.decode(executionData, (Step[]));
         uint256 n = steps.length;
         if (n == 0) revert EmptyRoute();
 
-        if (feeOnInput) {
-            _collectFee(tokenIn, actualIn);
-
-            if (tokenOut != address(0)) {
-                // Anti-contract-transfer tokens block transfer(contractAddr, amt), so steps
-                // deliver tokenOut directly to recipient. Measure the recipient's balance delta.
-                uint256 balBefore = SafeTransfer.balanceOf(tokenOut, recipient);
-                _executeSteps(steps, n);
-                amountOut = SafeTransfer.balanceOf(tokenOut, recipient) - balBefore;
-                if (amountOut < minAmountOut) revert InsufficientOutput(amountOut, minAmountOut);
-                return amountOut; // tokens already at recipient — skip _deliver
-            }
-            // Native BNB output: falls through; BNB still routes through OneDex.
-        }
-
-        _executeSteps(steps, n);
+        _executeSteps(steps, n, originalSender);
 
         amountOut = tokenOut == address(0)
             ? address(this).balance
             : SafeTransfer.balanceOf(tokenOut, address(this));
 
-        if (!feeOnInput) amountOut -= _collectFee(tokenOut, amountOut);
-
         if (amountOut < minAmountOut) revert InsufficientOutput(amountOut, minAmountOut);
         _deliver(tokenOut, recipient, amountOut);
     }
 
-    function _collectFee(address token, uint256 basis) internal returns (uint256 fee) {
-        address fr = feeRecipient;
-        fee = (basis * FEE_BPS) / 10_000;
-        if (fee == 0) return 0;
-        _deliver(token, fr, fee);
-        emit FeeCollected(token, fee);
-    }
-
-    function _executeSteps(Step[] memory steps, uint256 n) internal {
+    function _executeSteps(Step[] memory steps, uint256 n, address originalSender) internal {
         for (uint256 i; i < n; ) {
             Step memory step = steps[i];
+
+            // Pull tokens directly from the original caller to the step target.
+            // Used for FourMeme restricted-token sells: from=originalSender passes the token's
+            // tx.origin==from transfer restriction without transiting OneDex.
+            if (step.pullFromSenderToken != address(0) && step.pullFromSenderAmt > 0) {
+                SafeTransfer.safeTransferFrom(
+                    step.pullFromSenderToken,
+                    originalSender,
+                    step.target,
+                    step.pullFromSenderAmt
+                );
+            }
 
             // V3 pool style: approve target to pull tokens. USDT-safe: zero → amount.
             if (step.approveToken != address(0)) {
@@ -292,14 +280,6 @@ contract OneDex {
         bytes calldata data
     ) external {
         _handleV3Callback(amount0Delta, amount1Delta, data);
-    }
-
-    // ── Fee management ────────────────────────────────────────────────────────
-
-    function setFeeRecipient(address recipient_) external onlyOwner {
-        if (recipient_ == address(0)) revert ZeroAddress();
-        feeRecipient = recipient_;
-        emit FeeRecipientUpdated(recipient_);
     }
 
     // ── Pause ─────────────────────────────────────────────────────────────────
