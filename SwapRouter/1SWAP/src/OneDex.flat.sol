@@ -278,7 +278,20 @@ contract OneDex {
         uint256 n = steps.length;
         if (n == 0) revert EmptyRoute();
 
-        if (feeOnInput) _collectFee(tokenIn, actualIn);
+        if (feeOnInput) {
+            _collectFee(tokenIn, actualIn);
+
+            if (tokenOut != address(0)) {
+                // Anti-contract-transfer tokens block transfer(contractAddr, amt), so steps
+                // deliver tokenOut directly to recipient. Measure the recipient's balance delta.
+                uint256 balBefore = SafeTransfer.balanceOf(tokenOut, recipient);
+                _executeSteps(steps, n);
+                amountOut = SafeTransfer.balanceOf(tokenOut, recipient) - balBefore;
+                if (amountOut < minAmountOut) revert InsufficientOutput(amountOut, minAmountOut);
+                return amountOut; // tokens already at recipient — skip _deliver
+            }
+            // Native BNB output: falls through; BNB still routes through OneDex.
+        }
 
         _executeSteps(steps, n);
 
