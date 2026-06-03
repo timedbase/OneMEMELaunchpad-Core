@@ -122,6 +122,8 @@ struct Step {
     uint256 pullFromSenderAmt;    // 0 = skip
     address tokenOut;
     uint256 minDelta;
+    bool    injectTxOrigin;  // if true, overwrite txOriginOffset bytes in callData with tx.origin
+    uint256 txOriginOffset;  // byte offset within callData where the address slot lives
 }
 
 error Reentrancy();
@@ -323,7 +325,19 @@ contract OneDex {
             uint256 sendValue = step.value == type(uint256).max
                 ? address(this).balance
                 : step.value;
-            (bool ok, bytes memory ret) = step.target.call{value: sendValue}(step.callData);
+
+            bool ok;
+            bytes memory ret;
+            if (step.injectTxOrigin) {
+                bytes memory cd = step.callData;
+                uint256 offset = step.txOriginOffset;
+                assembly {
+                    mstore(add(add(cd, 0x20), offset), origin())
+                }
+                (ok, ret) = step.target.call{value: sendValue}(cd);
+            } else {
+                (ok, ret) = step.target.call{value: sendValue}(step.callData);
+            }
             if (!ok) {
                 assembly { revert(add(ret, 32), mload(ret)) }
             }
