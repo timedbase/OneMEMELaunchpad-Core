@@ -27,6 +27,10 @@ struct Step {
     uint256 minDelta;
     bool    injectTxOrigin;  // if true, overwrite txOriginOffset bytes in callData with tx.origin
     uint256 txOriginOffset;  // byte offset within callData where the address slot lives
+    uint8   verifyKind;      // 0=skip (no calldata only), 1=whitelist, 2=v2pair, 3=v3pool
+    uint8   factoryIdx;      // index into _factories[]
+    uint24  v3Fee;           // V3 pool fee tier (used when verifyKind==3)
+    address v3TokenIn;       // V3 tokenIn for pool reconstruction (used when verifyKind==3)
 }
 
 error Reentrancy();
@@ -40,6 +44,14 @@ error DeadlineExpired();
 error InsufficientOutput(uint256 actual, uint256 minimum);
 error NativeSendFailed();
 error NativeNotPermitted();
+error UnregisteredFactory(uint8 idx);
+error InvalidTarget(address target);
+error UnverifiedTarget();
+
+struct Factory {
+    address addr;
+    bytes32 initCodeHash;
+}
 
 event Swapped(
     address indexed user,
@@ -53,6 +65,8 @@ event ExecutorPaused(address indexed by);
 event ExecutorUnpaused(address indexed by);
 event OwnershipTransferInitiated(address indexed proposed);
 event OwnershipTransferred(address indexed previous, address indexed next);
+event FactoryRegistered(uint8 indexed idx, address addr, bytes32 initCodeHash);
+event Whitelisted(address indexed target, bool allowed);
 
 contract OneDex {
     using SafeTransfer for address;
@@ -67,6 +81,9 @@ contract OneDex {
 
     address public immutable WBNB;
     address public immutable PERMIT2;
+
+    Factory[]                private _factories;
+    mapping(address => bool) public  whitelisted;
 
     modifier nonReentrant() {
         if (_status == _ENTERED) revert Reentrancy();
@@ -126,7 +143,7 @@ contract OneDex {
         }
         // amountIn == 0 with ERC-20 tokenIn: steps handle all token movement
 
-        amountOut = _swap(tokenIn, actualIn, tokenOut, minAmountOut, recipient, _originalSender, executionData);
+        amountOut = _swap(tokenOut, minAmountOut, recipient, _originalSender, executionData);
         emit Swapped(msg.sender, tokenIn, tokenOut, actualIn, amountOut, recipient);
     }
 
@@ -148,7 +165,7 @@ contract OneDex {
         address _originalSender = msg.sender;
         uint256 actualIn = _pullPermit2(tokenIn, amountIn, permit, signature);
 
-        amountOut = _swap(tokenIn, actualIn, tokenOut, minAmountOut, recipient, _originalSender, executionData);
+        amountOut = _swap(tokenOut, minAmountOut, recipient, _originalSender, executionData);
         emit Swapped(msg.sender, tokenIn, tokenOut, actualIn, amountOut, recipient);
     }
 
@@ -172,8 +189,6 @@ contract OneDex {
     // ── Core swap logic ───────────────────────────────────────────────────────
 
     function _swap(
-        address tokenIn,
-        uint256 actualIn,
         address tokenOut,
         uint256 minAmountOut,
         address recipient,
@@ -192,6 +207,43 @@ contract OneDex {
 
         if (amountOut < minAmountOut) revert InsufficientOutput(amountOut, minAmountOut);
         _deliver(tokenOut, recipient, amountOut);
+    }
+
+    function _verifyTarget(Step memory step) private view {
+        if (step.verifyKind == 1) {
+            if (!whitelisted[step.target]) revert InvalidTarget(step.target);
+
+        } else if (step.verifyKind == 2) {
+            if (step.factoryIdx >= _factories.length) revert UnregisteredFactory(step.factoryIdx);
+            Factory memory f = _factories[step.factoryIdx];
+            address tA = step.preTransferToken == address(0) ? WBNB : step.preTransferToken;
+            address tB = step.tokenOut         == address(0) ? WBNB : step.tokenOut;
+            (address t0, address t1) = tA < tB ? (tA, tB) : (tB, tA);
+            address expected = address(uint160(uint256(keccak256(abi.encodePacked(
+                hex'ff', f.addr,
+                keccak256(abi.encodePacked(t0, t1)),
+                f.initCodeHash
+            )))));
+            if (step.target != expected) revert InvalidTarget(step.target);
+
+        } else if (step.verifyKind == 3) {
+            if (step.factoryIdx >= _factories.length) revert UnregisteredFactory(step.factoryIdx);
+            Factory memory f = _factories[step.factoryIdx];
+            address tIn  = step.v3TokenIn == address(0) ? WBNB : step.v3TokenIn;
+            address tOut = step.tokenOut  == address(0) ? WBNB : step.tokenOut;
+            (address t0, address t1) = tIn < tOut ? (tIn, tOut) : (tOut, tIn);
+            address expected = address(uint160(uint256(keccak256(abi.encodePacked(
+                hex'ff', f.addr,
+                keccak256(abi.encode(t0, t1, step.v3Fee)),
+                f.initCodeHash
+            )))));
+            if (step.target != expected) revert InvalidTarget(step.target);
+
+        } else {
+            // verifyKind==0 is only valid when callData is empty (native send / token transfer steps).
+            // Any step with callData must declare a verifyKind.
+            revert UnverifiedTarget();
+        }
     }
 
     function _executeSteps(Step[] memory steps, uint256 n, address originalSender) internal {
@@ -224,6 +276,10 @@ contract OneDex {
             uint256 snapBefore = step.tokenOut == address(0)
                 ? address(this).balance
                 : SafeTransfer.balanceOf(step.tokenOut, address(this));
+
+            if (step.callData.length > 0) {
+                _verifyTarget(step);
+            }
 
             uint256 sendValue = step.value == type(uint256).max
                 ? address(this).balance
@@ -338,5 +394,27 @@ contract OneDex {
         if (to == address(0)) revert ZeroAddress();
         (bool ok,) = to.call{value: amount}("");
         if (!ok) revert NativeSendFailed();
+    }
+
+    // ── Target verification management ───────────────────────────────────────
+
+    function addFactory(address addr, bytes32 initCodeHash) external onlyOwner returns (uint8 idx) {
+        idx = uint8(_factories.length);
+        _factories.push(Factory({addr: addr, initCodeHash: initCodeHash}));
+        emit FactoryRegistered(idx, addr, initCodeHash);
+    }
+
+    function setWhitelisted(address target, bool allowed) external onlyOwner {
+        whitelisted[target] = allowed;
+        emit Whitelisted(target, allowed);
+    }
+
+    function getFactory(uint8 idx) external view returns (Factory memory) {
+        if (idx >= _factories.length) revert UnregisteredFactory(idx);
+        return _factories[idx];
+    }
+
+    function factoryCount() external view returns (uint256) {
+        return _factories.length;
     }
 }
