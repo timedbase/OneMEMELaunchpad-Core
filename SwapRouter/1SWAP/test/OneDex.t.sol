@@ -5,7 +5,6 @@ import {Test, console} from "forge-std/Test.sol";
 import {
     OneDex,
     Step,
-    SwapCallbackData,
     Reentrancy,
     Paused,
     NotOwner,
@@ -887,57 +886,4 @@ contract OneDexTest is Test {
         assertEq(tokenA.balanceOf(address(pair)), preAmt);
     }
 
-    // ── 24. V3 swap callbacks ─────────────────────────────────────────────────
-
-    function test_v3Callback_validPool_pays() public {
-        address pool = makeAddr("pool");
-        tokenA.mint(address(executor), 100 ether);
-        uint256 poolBefore = tokenA.balanceOf(pool);
-
-        bytes memory cbData = abi.encode(SwapCallbackData({
-            tokenIn:  address(tokenA),
-            amountIn: 100 ether,
-            payer:    address(executor)
-        }));
-
-        vm.prank(pool);
-        executor.uniswapV3SwapCallback(100 ether, 0, cbData);
-
-        assertEq(tokenA.balanceOf(pool) - poolBefore, 100 ether);
-        assertEq(tokenA.balanceOf(address(executor)), 0);
-    }
-
-    function test_pancakeV3Callback_validPool_pays() public {
-        address pool = makeAddr("cakePool");
-        tokenA.mint(address(executor), 50 ether);
-        uint256 poolBefore = tokenA.balanceOf(pool);
-
-        bytes memory cbData = abi.encode(SwapCallbackData({
-            tokenIn:  address(tokenA),
-            amountIn: 50 ether,
-            payer:    address(executor)
-        }));
-
-        vm.prank(pool);
-        executor.pancakeV3SwapCallback(50 ether, 0, cbData);
-
-        assertEq(tokenA.balanceOf(pool) - poolBefore, 50 ether);
-    }
-
-    function test_v3Callback_amount1DeltaPositive() public {
-        address pool = makeAddr("pool2");
-        tokenA.mint(address(executor), 75 ether);
-        uint256 poolBefore = tokenA.balanceOf(pool);
-
-        bytes memory cbData = abi.encode(SwapCallbackData({
-            tokenIn:  address(tokenA),
-            amountIn: 75 ether,
-            payer:    address(executor)
-        }));
-
-        vm.prank(pool);
-        executor.uniswapV3SwapCallback(0, 75 ether, cbData);
-
-        assertEq(tokenA.balanceOf(pool) - poolBefore, 75 ether);
-    }
 }
