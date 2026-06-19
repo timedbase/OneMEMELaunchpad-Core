@@ -234,8 +234,7 @@ contract SparkLauncher {
         }
 
         // 2. Deploy EIP-1167 token clone
-        token = _clone(tokenImpl);
-        ISparkToken(token).initSpark(name_, symbol_, metaURI_, address(this));
+        token = _deployAndInit(name_, symbol_, metaURI_);
 
         // 3. Sort tokens; derive pool seed amounts
         bool quoteFirst = quoteToken_ < token;
@@ -306,6 +305,17 @@ contract SparkLauncher {
     }
 
     receive() external payable {}
+
+    // Isolated so the three string calldata params stay near the top of the EVM stack
+    // when initSpark is called, avoiding stack-too-deep in launch().
+    function _deployAndInit(
+        string calldata name_,
+        string calldata symbol_,
+        string calldata metaURI_
+    ) private returns (address token) {
+        token = _clone(tokenImpl);
+        ISparkToken(token).initSpark(name_, symbol_, metaURI_, address(this));
+    }
 
     // EIP-1167 minimal proxy — 55-byte deployment (10 creation + 45 runtime).
     //   creation : 3d602d80600a3d3981f3
