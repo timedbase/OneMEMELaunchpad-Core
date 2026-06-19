@@ -364,7 +364,8 @@ contract SparkLauncher {
 
     // Reset allowance to 0 before setting — handles USDT's non-zero→non-zero restriction.
     function _safeApprove(address token_, address spender, uint256 amount) private {
-        token_.call(abi.encodeWithSelector(0x095ea7b3, spender, 0)); // approve(address,uint256)
+        (bool _ok,) = token_.call(abi.encodeWithSelector(0x095ea7b3, spender, 0)); // approve(address,uint256)
+        _ok;
         (bool ok, ) = token_.call(abi.encodeWithSelector(0x095ea7b3, spender, amount));
         if (!ok) revert ApprovalFailed();
     }
