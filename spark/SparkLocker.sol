@@ -10,6 +10,7 @@ interface IPositionManager {
     }
     function collect(CollectParams calldata params)
         external payable returns (uint256 amount0, uint256 amount1);
+    function safeTransferFrom(address from, address to, uint256 tokenId) external;
     function positions(uint256 tokenId) external view returns (
         uint96  nonce,
         address operator,
@@ -101,6 +102,7 @@ contract SparkLocker {
     event CharityWalletSet(address indexed wallet);
     event FeeBpsUpdated(uint256 creatorBps, uint256 platformBps, uint256 charityBps);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event EmergencyWithdraw(address indexed token, address indexed to, uint256 tokenId);
 
     modifier onlyOwner()    { if (msg.sender != owner)    revert NotOwner();    _; }
     modifier onlyLauncher() { if (msg.sender != launcher) revert NotLauncher(); _; }
@@ -198,6 +200,16 @@ contract SparkLocker {
         return allTokens.length;
     }
 
+    function emergencyWithdraw(address token) external onlyOwner {
+        Position storage pos = positions[token];
+        if (pos.tokenId == 0) revert UnknownToken();
+        uint256 tokenId         = pos.tokenId;
+        address positionManager = pos.positionManager;
+        delete positions[token]; // clears tokenId so fee-claim loops skip gracefully
+        IPositionManager(positionManager).safeTransferFrom(address(this), platformWallet, tokenId);
+        emit EmergencyWithdraw(token, platformWallet, tokenId);
+    }
+
     // Returns the creator's share of currently uncollected fees using V3 fee-growth math.
     // See SPARK.md → "Pending Fee Formula" for derivation.
     function pendingCreatorFees(address token) external view returns (
@@ -220,31 +232,39 @@ contract SparkLocker {
 
         IUniswapV3PoolFees poolView = IUniswapV3PoolFees(pos.pool);
         (, int24 currentTick,,,,,) = poolView.slot0();
-        uint256 fgGlobal0 = poolView.feeGrowthGlobal0X128();
-        uint256 fgGlobal1 = poolView.feeGrowthGlobal1X128();
 
-        (,, uint256 fgOutsideLower0, uint256 fgOutsideLower1,,,,) = poolView.ticks(tickLower);
-        (,, uint256 fgOutsideUpper0, uint256 fgOutsideUpper1,,,,) = poolView.ticks(tickUpper);
+        // Pass fgGlobal values inline to avoid two extra stack slots.
+        (uint256 fgi0, uint256 fgi1) = _feeGrowthInside(
+            poolView, tickLower, tickUpper, currentTick,
+            poolView.feeGrowthGlobal0X128(), poolView.feeGrowthGlobal1X128()
+        );
 
-        uint256 total0;
-        uint256 total1;
         unchecked {
-            // Standard V3 fee-growth-inside derivation; all subtraction wraps intentionally.
-            uint256 fgBelow0 = currentTick >= tickLower ? fgOutsideLower0 : fgGlobal0 - fgOutsideLower0;
-            uint256 fgAbove0 = currentTick <  tickUpper ? fgOutsideUpper0 : fgGlobal0 - fgOutsideUpper0;
-            uint256 fgBelow1 = currentTick >= tickLower ? fgOutsideLower1 : fgGlobal1 - fgOutsideLower1;
-            uint256 fgAbove1 = currentTick <  tickUpper ? fgOutsideUpper1 : fgGlobal1 - fgOutsideUpper1;
-
-            uint256 fgInside0 = fgGlobal0 - fgBelow0 - fgAbove0;
-            uint256 fgInside1 = fgGlobal1 - fgBelow1 - fgAbove1;
-
-            // pending = liquidity × ΔfeeGrowthInside / 2¹²⁸ + tokensOwed
-            total0 = uint256(liquidity) * (fgInside0 - fg0Last) / (1 << 128) + owed0;
-            total1 = uint256(liquidity) * (fgInside1 - fg1Last) / (1 << 128) + owed1;
+            uint256 liq = uint256(liquidity);
+            amount0 = (liq * (fgi0 - fg0Last) / (1 << 128) + owed0) * creatorBps / BPS;
+            amount1 = (liq * (fgi1 - fg1Last) / (1 << 128) + owed1) * creatorBps / BPS;
         }
+    }
 
-        amount0 = total0 * creatorBps / BPS;
-        amount1 = total1 * creatorBps / BPS;
+    // Standard V3 fee-growth-inside derivation; all unchecked subtraction wraps intentionally.
+    function _feeGrowthInside(
+        IUniswapV3PoolFees pool,
+        int24 tickLower,
+        int24 tickUpper,
+        int24 currentTick,
+        uint256 fgGlobal0,
+        uint256 fgGlobal1
+    ) private view returns (uint256 fgInside0, uint256 fgInside1) {
+        (,, uint256 lo0, uint256 lo1,,,,) = pool.ticks(tickLower);
+        (,, uint256 hi0, uint256 hi1,,,,) = pool.ticks(tickUpper);
+        unchecked {
+            uint256 below0 = currentTick >= tickLower ? lo0 : fgGlobal0 - lo0;
+            uint256 above0 = currentTick <  tickUpper ? hi0 : fgGlobal0 - hi0;
+            uint256 below1 = currentTick >= tickLower ? lo1 : fgGlobal1 - lo1;
+            uint256 above1 = currentTick <  tickUpper ? hi1 : fgGlobal1 - hi1;
+            fgInside0 = fgGlobal0 - below0 - above0;
+            fgInside1 = fgGlobal1 - below1 - above1;
+        }
     }
 
     function onERC721Received(address, address, uint256, bytes calldata)

@@ -3,6 +3,7 @@ pragma solidity ^0.8.32;
 
 interface ISparkToken {
     function initSpark(string calldata name_, string calldata symbol_, string calldata metaURI_, address launcher_) external;
+    function transferOwnership(address newOwner) external;
     function approve(address spender, uint256 amount) external returns (bool);
     function transfer(address to, uint256 amount) external returns (bool);
     function balanceOf(address account) external view returns (uint256);
@@ -297,6 +298,9 @@ contract SparkLauncher {
         // 9. Send creator token allocation (0.01 % + pool-mint dust)
         uint256 creatorTokens = ISparkToken(token).balanceOf(address(this));
         if (creatorTokens > 0) ISparkToken(token).transfer(msg.sender, creatorTokens);
+
+        // 10. Hand token ownership to the creator — all launcher operations are complete.
+        ISparkToken(token).transferOwnership(msg.sender);
 
         emit TokenLaunched(token, msg.sender, factory_, quoteToken_, feeWallet, pool, tokenId);
     }

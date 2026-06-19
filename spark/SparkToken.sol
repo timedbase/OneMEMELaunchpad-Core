@@ -5,17 +5,21 @@ contract SparkToken {
 
     error AlreadyInitialized();
     error ZeroAddress();
+    error NotOwner();
     error InsufficientBalance();
     error ExceedsAllowance();
     error PermitExpired();
     error InvalidSignature();
 
-    bool   private _initialized;
+    bool    private _initialized;
+    address private _owner;
 
     string private _name;
     string  private _symbol;
     string  private _metaURI;
     uint256 private _totalSupply;
+
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
 
     mapping(address => uint256)                     private _balances;
     mapping(address => mapping(address => uint256)) private _allowances;
@@ -41,6 +45,8 @@ contract SparkToken {
         if (_initialized)            revert AlreadyInitialized();
         if (launcher_ == address(0)) revert ZeroAddress();
         _initialized = true;
+        _owner = msg.sender;
+        emit OwnershipTransferred(address(0), msg.sender);
 
         _name    = name_;
         _symbol  = symbol_;
@@ -61,6 +67,19 @@ contract SparkToken {
     function decimals()    external pure returns (uint8)         { return 18;           }
     function totalSupply() external view returns (uint256)       { return _totalSupply; }
     function metaURI()     external view returns (string memory) { return _metaURI;     }
+    function owner()       external view returns (address)       { return _owner;       }
+
+    function setMetaURI(string calldata uri_) external {
+        if (msg.sender != _owner) revert NotOwner();
+        _metaURI = uri_;
+        emit MetaURISet(uri_);
+    }
+
+    function transferOwnership(address newOwner) external {
+        if (msg.sender != _owner) revert NotOwner();
+        emit OwnershipTransferred(_owner, newOwner);
+        _owner = newOwner;
+    }
 
     function balanceOf(address account) external view returns (uint256) {
         return _balances[account];
