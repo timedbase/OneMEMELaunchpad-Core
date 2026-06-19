@@ -491,7 +491,7 @@ contract ReflectionToken is ILaunchpadToken {
                 uint256 share = amount * bal / eligibleSupply;
                 if (share > 0) {
                     try IERC20Minimal(reflectionToken).transfer(holder, share) returns (bool ok) {
-                        if (ok) unchecked { ++recipients; }
+                        if (ok) { unchecked { ++recipients; } }
                     } catch {}
                 }
             }
