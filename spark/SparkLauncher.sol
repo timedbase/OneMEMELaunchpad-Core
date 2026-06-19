@@ -215,90 +215,100 @@ contract SparkLauncher {
         address         quoteToken_,
         uint256         extraBuy_
     ) external payable returns (address token, address pool, uint256 tokenId) {
+        // Deploy while string params are still near the top of the EVM stack (13 slots total
+        // here vs 22+ if deferred past the address/uint locals below). The remaining work is
+        // delegated to _setupAndRegister so those string slots never appear in the same frame.
+        token = _deployAndInit(name_, symbol_, metaURI_);
+        (pool, tokenId) = _setupAndRegister(token, feeWallet_, factory_, quoteToken_, extraBuy_);
+    }
+
+    // Contains all post-deploy launch logic. Separated from launch() so the three string
+    // calldata params (6 stack slots) are absent, keeping peak stack depth within the EVM limit.
+    function _setupAndRegister(
+        address token,
+        address feeWallet_,
+        address factory_,
+        address quoteToken_,
+        uint256 extraBuy_
+    ) private returns (address pool, uint256 tokenId) {
         DexConfig memory dex = dexes[factory_];
         if (!dex.enabled) revert UnsupportedDex();
 
-        QuoteToken memory qt = quoteTokens[quoteToken_];
-        if (!qt.enabled) revert UnsupportedQuoteToken();
-
         address feeWallet = feeWallet_ == address(0) ? msg.sender : feeWallet_;
-        uint256 quoteFee  = qt.launchFee;
 
-        // 1. Collect launch fee (+ optional extra buy amount)
-        if (qt.isNative) {
-            if (msg.value < quoteFee) revert WrongFee();
-            IWETH(weth).deposit{value: msg.value}(); // excess over fee is available as WETH dust for step 8
-        } else {
-            if (msg.value != 0) revert UnexpectedETH();
-            _pullFrom(quoteToken_, msg.sender, quoteFee + extraBuy_);
+        // Scope qt to free its stack slot after fee collection.
+        uint256 quoteFee;
+        {
+            QuoteToken memory qt = quoteTokens[quoteToken_];
+            if (!qt.enabled) revert UnsupportedQuoteToken();
+            quoteFee = qt.launchFee;
+            if (qt.isNative) {
+                if (msg.value < quoteFee) revert WrongFee();
+                IWETH(weth).deposit{value: msg.value}();
+            } else {
+                if (msg.value != 0) revert UnexpectedETH();
+                _pullFrom(quoteToken_, msg.sender, quoteFee + extraBuy_);
+            }
         }
 
-        // 2. Deploy EIP-1167 token clone
-        token = _deployAndInit(name_, symbol_, metaURI_);
+        // Scope pool-setup locals (token0/1, a0/1) to free them after registration.
+        {
+            (address token0, address token1, uint256 a0, uint256 a1) = quoteToken_ < token
+                ? (quoteToken_, token,  quoteFee,    POOL_TOKENS)
+                : (token,        quoteToken_, POOL_TOKENS, quoteFee);
 
-        // 3. Sort tokens; derive pool seed amounts
-        bool quoteFirst = quoteToken_ < token;
-        (address token0, address token1) = quoteFirst
-            ? (quoteToken_, token)
-            : (token,        quoteToken_);
-        (uint256 a0, uint256 a1) = quoteFirst
-            ? (quoteFee,    POOL_TOKENS)
-            : (POOL_TOKENS, quoteFee);
+            if (IUniswapV3Factory(factory_).getPool(token0, token1, FEE_TIER) != address(0))
+                revert PoolAlreadyExists();
+            pool = IUniswapV3Factory(factory_).createPool(token0, token1, FEE_TIER);
+            IUniswapV3Pool(pool).initialize(_sqrtPriceX96(a0, a1));
 
-        // 4. Create and initialise pool
-        // Checked upfront — createPool reverts with an opaque error on duplicate; getPool gives descriptive one.
-        if (IUniswapV3Factory(factory_).getPool(token0, token1, FEE_TIER) != address(0))
-            revert PoolAlreadyExists();
-        pool = IUniswapV3Factory(factory_).createPool(token0, token1, FEE_TIER);
-        IUniswapV3Pool(pool).initialize(_sqrtPriceX96(a0, a1));
+            _safeApprove(quoteToken_, dex.positionManager, quoteFee);
+            _safeApprove(token,       dex.positionManager, POOL_TOKENS);
 
-        // 5. Approve position manager
-        _safeApprove(quoteToken_, dex.positionManager, quoteFee); // USDT-safe (reset then set)
-        _safeApprove(token,       dex.positionManager, POOL_TOKENS);
+            (tokenId, , , ) = INonfungiblePositionManager(dex.positionManager).mint(
+                INonfungiblePositionManager.MintParams({
+                    token0:         token0,
+                    token1:         token1,
+                    fee:            FEE_TIER,
+                    tickLower:      TICK_LOWER,
+                    tickUpper:      TICK_UPPER,
+                    amount0Desired: a0,
+                    amount1Desired: a1,
+                    amount0Min:     0,
+                    amount1Min:     0,
+                    recipient:      address(locker),
+                    deadline:       block.timestamp
+                })
+            );
 
-        // 6. Mint full-range LP position; NFT recipient is the locker (permanent lock)
-        (tokenId, , , ) = INonfungiblePositionManager(dex.positionManager).mint(
-            INonfungiblePositionManager.MintParams({
-                token0:         token0,
-                token1:         token1,
-                fee:            FEE_TIER,
-                tickLower:      TICK_LOWER,
-                tickUpper:      TICK_UPPER,
-                amount0Desired: a0,
-                amount1Desired: a1,
-                amount0Min:     0,
-                amount1Min:     0,
-                recipient:      address(locker),
-                deadline:       block.timestamp
-            })
-        );
-
-        // 7. Register position in locker
-        locker.registerPosition(
-            token, tokenId, feeWallet, token0, token1, pool, dex.positionManager
-        );
-
-        // 8. Swap unspent quote-token dust → launched token for creator (instant buy at launch price)
-        uint256 quoteDust = _balanceOf(quoteToken_, address(this));
-        if (quoteDust > 0) {
-            _safeApprove(quoteToken_, dex.router, quoteDust);
-            ISwapRouter(dex.router).exactInputSingle(ISwapRouter.ExactInputSingleParams({
-                tokenIn:           quoteToken_,
-                tokenOut:          token,
-                fee:               FEE_TIER,
-                recipient:         msg.sender,
-                deadline:          block.timestamp,
-                amountIn:          quoteDust,
-                amountOutMinimum:  0,
-                sqrtPriceLimitX96: 0
-            }));
+            locker.registerPosition(
+                token, tokenId, feeWallet, token0, token1, pool, dex.positionManager
+            );
         }
 
-        // 9. Send creator token allocation (0.01 % + pool-mint dust)
-        uint256 creatorTokens = ISparkToken(token).balanceOf(address(this));
-        if (creatorTokens > 0) ISparkToken(token).transfer(msg.sender, creatorTokens);
+        // Scope quoteDust to free its slot before the creator-token transfer.
+        {
+            uint256 quoteDust = _balanceOf(quoteToken_, address(this));
+            if (quoteDust > 0) {
+                _safeApprove(quoteToken_, dex.router, quoteDust);
+                ISwapRouter(dex.router).exactInputSingle(ISwapRouter.ExactInputSingleParams({
+                    tokenIn:           quoteToken_,
+                    tokenOut:          token,
+                    fee:               FEE_TIER,
+                    recipient:         msg.sender,
+                    deadline:          block.timestamp,
+                    amountIn:          quoteDust,
+                    amountOutMinimum:  0,
+                    sqrtPriceLimitX96: 0
+                }));
+            }
+        }
 
-        // 10. Hand token ownership to the creator — all launcher operations are complete.
+        {
+            uint256 creatorTokens = ISparkToken(token).balanceOf(address(this));
+            if (creatorTokens > 0) ISparkToken(token).transfer(msg.sender, creatorTokens);
+        }
+
         ISparkToken(token).transferOwnership(msg.sender);
 
         emit TokenLaunched(token, msg.sender, factory_, quoteToken_, feeWallet, pool, tokenId);
