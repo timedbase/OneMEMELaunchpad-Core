@@ -49,14 +49,15 @@ contract TaxToken is ILaunchpadToken {
     error InsufficientBalance();
     error NothingToSwap();
     error CannotRescueOwnToken();
+    error BondingPhaseActive();
     error BNBTransferFailed();
     error TokenRescueFailed();
     error PermitExpired();
     error InvalidSignature();
 
     address private _owner;
-    address private _factory;
-    address private _migrator;
+    address public factory;
+    address public migrator;
     bool    private _initialized;
     bool    private _inBondingPhase;
 
@@ -117,8 +118,7 @@ contract TaxToken is ILaunchpadToken {
 
     modifier lockSwap()   { inSwap = true; _; inSwap = false; }
     modifier onlyOwner()  { if (msg.sender != _owner)   revert NotOwner();   _; }
-    modifier onlyFactory()        { if (msg.sender != _factory) revert NotFactory(); _; }
-    modifier onlyFactoryOrCurve() { if (msg.sender != _factory && msg.sender != _migrator) revert NotFactory(); _; }
+    modifier onlyFactoryOrCurve() { if (msg.sender != factory && msg.sender != migrator) revert NotFactory(); _; }
 
     constructor() { _initialized = true; }
 
@@ -141,8 +141,8 @@ contract TaxToken is ILaunchpadToken {
 
         _initialized    = true;
         _inBondingPhase = true;
-        _factory        = factory_;
-        _migrator   = migrator_;
+        factory        = factory_;
+        migrator   = migrator_;
         _owner          = tokenOwner_;
 
         _name        = name_;
@@ -168,7 +168,6 @@ contract TaxToken is ILaunchpadToken {
         // Pair is created now; liquidity is added only at migration.
         pancakeRouter = IPancakeRouter02TT(router_);
         pancakePair   = IPancakeFactoryTT(pancakeRouter.factory()).createPair(address(this), pancakeRouter.WETH());
-        _isExcludedFromFee[pancakePair] = true;
 
         _balances[factory_] = totalSupply_;
         emit Transfer(address(0), factory_, totalSupply_);
@@ -250,12 +249,14 @@ contract TaxToken is ILaunchpadToken {
         uint256 burnAmt;
         uint256 taxAmt;
 
-        if (isBuy) {
-            burnAmt = (amount * buyBurnTax) / 10000;
-            taxAmt  = (amount * (buyMarketingTax + buyTeamTax + buyTreasuryTax + buyLiquidityTax)) / 10000;
-        } else if (isSell) {
-            burnAmt = (amount * sellBurnTax) / 10000;
-            taxAmt  = (amount * (sellMarketingTax + sellTeamTax + sellTreasuryTax + sellLiquidityTax)) / 10000;
+        if (!_inBondingPhase) {
+            if (isBuy) {
+                burnAmt = (amount * buyBurnTax) / 10000;
+                taxAmt  = (amount * (buyMarketingTax + buyTeamTax + buyTreasuryTax + buyLiquidityTax)) / 10000;
+            } else if (isSell) {
+                burnAmt = (amount * sellBurnTax) / 10000;
+                taxAmt  = (amount * (sellMarketingTax + sellTeamTax + sellTreasuryTax + sellLiquidityTax)) / 10000;
+            }
         }
 
         uint256 transferAmt = amount - burnAmt - taxAmt;
@@ -371,6 +372,7 @@ contract TaxToken is ILaunchpadToken {
     }
 
     function setBuyTaxes(uint256 mkt, uint256 team, uint256 tsy, uint256 burn, uint256 lp) external onlyOwner {
+        if (_inBondingPhase) revert BondingPhaseActive();
         if (mkt + team + tsy + burn + lp > MAX_TOTAL_TAX) revert TaxExceedsMax();
         buyMarketingTax = mkt; buyTeamTax = team; buyTreasuryTax = tsy;
         buyBurnTax = burn; buyLiquidityTax = lp;
@@ -378,6 +380,7 @@ contract TaxToken is ILaunchpadToken {
     }
 
     function setSellTaxes(uint256 mkt, uint256 team, uint256 tsy, uint256 burn, uint256 lp) external onlyOwner {
+        if (_inBondingPhase) revert BondingPhaseActive();
         if (mkt + team + tsy + burn + lp > MAX_TOTAL_TAX) revert TaxExceedsMax();
         sellMarketingTax = mkt; sellTeamTax = team; sellTreasuryTax = tsy;
         sellBurnTax = burn; sellLiquidityTax = lp;

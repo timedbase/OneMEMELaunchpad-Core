@@ -48,24 +48,22 @@ contract ReflectionToken is ILaunchpadToken {
     error ZeroAmount();
     error ExceedsMax();
     error ExceedsAllowance();
-    error AlreadyExcluded();
-    error NotExcluded();
     error DexAlreadyConfigured();
     error CannotReflectSelf();
     error CannotRescueOwnToken();
+    error BondingPhaseActive();
 
     error InsufficientBalance();
     error BNBTransferFailed();
     error BelowMinReflectionThreshold();
     error SwapThresholdTooLow();
-    error ReflectionTransferFailed();
     error TokenRescueFailed();
     error PermitExpired();
     error InvalidSignature();
 
     address private _owner;
-    address private _factory;
-    address private _migrator;
+    address public factory;
+    address public migrator;
     bool    private _initialized;
     bool    private _inBondingPhase;
 
@@ -131,7 +129,6 @@ contract ReflectionToken is ILaunchpadToken {
     // token and pushed proportionally to qualifying holders.
     address public reflectionToken;
 
-    // Initialised to 0.02 % of total supply; owner may only raise it, never lower.
     uint256 public reflectionMinBalance;
 
     address[] private _holders;
@@ -147,8 +144,6 @@ contract ReflectionToken is ILaunchpadToken {
     event BuyTaxesUpdated(uint256 marketing, uint256 team, uint256 lp, uint256 burn, uint256 reflection);
     event SellTaxesUpdated(uint256 marketing, uint256 team, uint256 lp, uint256 burn, uint256 reflection);
     event SwapAndLiquify(uint256 tokensSwapped, uint256 bnb);
-    event ExcludedFromReflection(address indexed account);
-    event IncludedInReflection(address indexed account);
     event DexConfigured(address pair, address router);
     event MetaURIUpdated(string uri);
     event ReflectionTokenSet(address indexed token);
@@ -157,8 +152,7 @@ contract ReflectionToken is ILaunchpadToken {
 
     modifier lockSwap()   { inSwap = true; _; inSwap = false; }
     modifier onlyOwner()  { if (msg.sender != _owner)   revert NotOwner();   _; }
-    modifier onlyFactory()        { if (msg.sender != _factory) revert NotFactory(); _; }
-    modifier onlyFactoryOrCurve() { if (msg.sender != _factory && msg.sender != _migrator) revert NotFactory(); _; }
+    modifier onlyFactoryOrCurve() { if (msg.sender != factory && msg.sender != migrator) revert NotFactory(); _; }
 
     constructor() { _initialized = true; }
 
@@ -181,8 +175,8 @@ contract ReflectionToken is ILaunchpadToken {
 
         _initialized    = true;
         _inBondingPhase = true;
-        _factory        = factory_;
-        _migrator   = migrator_;
+        factory        = factory_;
+        migrator   = migrator_;
         _owner          = tokenOwner_;
 
         _name   = name_;
@@ -217,7 +211,6 @@ contract ReflectionToken is ILaunchpadToken {
         // Pair is created now; liquidity is added only at migration.
         pancakeRouter = IPancakeRouter02RFL(router_);
         pancakePair   = IPancakeFactoryRFL(pancakeRouter.factory()).createPair(address(this), pancakeRouter.WETH());
-        _isExcludedFromFee[pancakePair] = true;
         _excludeFromReflectionInternal(pancakePair);
 
         emit Transfer(address(0), factory_, _tTotal);
@@ -325,6 +318,7 @@ contract ReflectionToken is ILaunchpadToken {
     }
 
     function _calcFees(uint256 tAmount, bool isBuy, bool isSell) private view returns (FeeValues memory f) {
+        if (_inBondingPhase) return f;
         if (isBuy) {
             f.tReflection  = (tAmount * buyReflectionTax) / BPS_DENOM;
             f.tBurn        = (tAmount * buyBurnTax)       / BPS_DENOM;
@@ -496,9 +490,9 @@ contract ReflectionToken is ILaunchpadToken {
             if (bal >= minBal) {
                 uint256 share = amount * bal / eligibleSupply;
                 if (share > 0) {
-                    bool ok = IERC20Minimal(reflectionToken).transfer(holder, share);
-                    if (!ok) revert ReflectionTransferFailed();
-                    unchecked { ++recipients; }
+                    try IERC20Minimal(reflectionToken).transfer(holder, share) returns (bool ok) {
+                        if (ok) unchecked { ++recipients; }
+                    } catch {}
                 }
             }
             unchecked { ++i; }
@@ -569,58 +563,29 @@ contract ReflectionToken is ILaunchpadToken {
         }
         _isExcludedFromReflection[account] = true;
         _excluded.push(account);
-        emit ExcludedFromReflection(account);
     }
 
-    function excludeFromReflection(address account) external onlyOwner {
-        if (_isExcludedFromReflection[account]) revert AlreadyExcluded();
-        _excludeFromReflectionInternal(account);
-        uint256 idx = _holderIndex[account];
-        if (idx != 0) {
-            uint256 last = _holders.length - 1;
-            address lastHolder = _holders[last];
-            _holders[idx - 1]        = lastHolder;
-            _holderIndex[lastHolder] = idx;
-            _holders.pop();
-            _holderIndex[account]    = 0;
-        }
-    }
-
-    function includeInReflection(address account) external onlyOwner {
-        if (!_isExcludedFromReflection[account]) revert NotExcluded();
-        uint256 len = _excluded.length;
-        for (uint256 i; i < len; ) {
-            if (_excluded[i] == account) {
-                _excluded[i] = _excluded[len - 1];
-                _excluded.pop();
-                break;
-            }
-            unchecked { ++i; }
-        }
-        _tOwned[account]                   = 0;
-        _isExcludedFromReflection[account] = false;
-        // Re-add so the account resumes receiving custom reflection without waiting for a transfer.
-        if (balanceOf(account) > 0 && _holderIndex[account] == 0) {
-            _holders.push(account);
-            _holderIndex[account] = _holders.length; // 1-based index
-        }
-        emit IncludedInReflection(account);
-    }
-
-    // Pass address(0) to revert to native RFI mode; unswapped accumulation for the
-    // previous token is discarded.
-    function setReflectionToken(address token_) external onlyOwner {
+    // Pass address(0) to revert to native RFI mode.
+    // Any pending custom reflection is flushed to holders before the switch.
+    function setReflectionToken(address token_) external onlyOwner lockSwap {
         if (token_ == address(this)) revert CannotReflectSelf();
-        _toSwapForReflection = 0;
+        if (_toSwapForReflection > 0 && reflectionToken != address(0)) {
+            uint256 pending = _toSwapForReflection;
+            _toSwapForReflection = 0;
+            uint256 preBal = IERC20Minimal(reflectionToken).balanceOf(address(this));
+            _swapForReflectionToken(pending);
+            uint256 received = IERC20Minimal(reflectionToken).balanceOf(address(this)) - preBal;
+            if (received > 0) _distributeReflection(received);
+        } else {
+            _toSwapForReflection = 0;
+        }
         reflectionToken = token_;
         emit ReflectionTokenSet(token_);
     }
 
-    // Cannot be decreased; floor is 0.02 % of total supply (dust protection).
     function setReflectionMinBalance(uint256 minBalance_) external onlyOwner {
         uint256 floor = (_tTotal * MIN_REFLECTION_BPS) / BPS_DENOM;
         if (minBalance_ < floor) revert BelowMinReflectionThreshold();
-        if (minBalance_ < reflectionMinBalance) revert BelowMinReflectionThreshold();
         reflectionMinBalance = minBalance_;
         emit ReflectionMinBalanceSet(minBalance_);
     }
@@ -628,6 +593,7 @@ contract ReflectionToken is ILaunchpadToken {
     function holderCount() external view returns (uint256) { return _holders.length; }
 
     function setBuyTaxes(uint256 mkt, uint256 team, uint256 lp, uint256 burn, uint256 rfl) external onlyOwner {
+        if (_inBondingPhase) revert BondingPhaseActive();
         if (mkt + team + lp + burn + rfl > MAX_TOTAL_TAX) revert ExceedsMax();
         buyMarketingTax = mkt; buyTeamTax = team; buyLiquidityTax = lp;
         buyBurnTax = burn; buyReflectionTax = rfl;
@@ -635,6 +601,7 @@ contract ReflectionToken is ILaunchpadToken {
     }
 
     function setSellTaxes(uint256 mkt, uint256 team, uint256 lp, uint256 burn, uint256 rfl) external onlyOwner {
+        if (_inBondingPhase) revert BondingPhaseActive();
         if (mkt + team + lp + burn + rfl > MAX_TOTAL_TAX) revert ExceedsMax();
         sellMarketingTax = mkt; sellTeamTax = team; sellLiquidityTax = lp;
         sellBurnTax = burn; sellReflectionTax = rfl;
