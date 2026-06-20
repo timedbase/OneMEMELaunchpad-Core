@@ -86,11 +86,10 @@ contract LaunchpadFactory {
 
     address public owner;
     address public pendingOwner;
-    mapping(address => bool) public managers;
 
-    address public immutable standardImpl;
-    address public immutable taxImpl;
-    address public immutable reflectionImpl;
+    address public standardImpl;
+    address public taxImpl;
+    address public reflectionImpl;
 
     BondingCurve public immutable migrator;
     address public vestingWallet;
@@ -119,7 +118,6 @@ contract LaunchpadFactory {
 
     error NotOwner();
     error NotPendingOwner();
-    error Unauthorized();
     error Reentrancy();
     error ZeroAddress();
     error ZeroAmount();
@@ -150,8 +148,6 @@ contract LaunchpadFactory {
     event CharityWalletUpdated(address wallet);
     event PlatformFeeUpdated(uint256 feeBps);
     event CharityFeeUpdated(uint256 feeBps);
-    event ManagerAdded(address indexed manager);
-    event ManagerRemoved(address indexed manager);
     event OwnershipTransferProposed(address indexed current, address indexed proposed);
     event OwnershipTransferred(address indexed prev, address indexed next);
     event VestingWalletUpdated(address indexed prev, address indexed next);
@@ -160,12 +156,9 @@ contract LaunchpadFactory {
     event TimelockCancelled(bytes32 indexed actionId);
     event BNBRescued(address indexed to, uint256 amount);
     event TokenRescued(address indexed token, address indexed to, uint256 amount);
+    event ImplUpdated(string implType, address indexed prev, address indexed next);
 
     modifier onlyOwner() { if (msg.sender != owner) revert NotOwner(); _; }
-    modifier onlyOwnerOrManager() {
-        if (msg.sender != owner && !managers[msg.sender]) revert Unauthorized();
-        _;
-    }
     modifier nonReentrant() {
         if (_status == _ENTERED) revert Reentrancy();
         _status = _ENTERED;
@@ -288,7 +281,7 @@ contract LaunchpadFactory {
         migrator.migrate(token_);
     }
 
-    function setDefaultParams(uint256 virtualBNB_, uint256 migrationTarget_) external onlyOwnerOrManager {
+    function setDefaultParams(uint256 virtualBNB_, uint256 migrationTarget_) external onlyOwner {
         if (virtualBNB_      == 0) revert ZeroAmount();
         if (migrationTarget_ == 0) revert ZeroAmount();
         if (virtualBNB_      > 10_000 ether)  revert ParamOutOfRange();
@@ -376,6 +369,24 @@ contract LaunchpadFactory {
         emit TimelockCancelled(actionId);
     }
 
+    function setStandardImpl(address impl_) external onlyOwner {
+        if (impl_ == address(0)) revert ZeroAddress();
+        emit ImplUpdated("standard", standardImpl, impl_);
+        standardImpl = impl_;
+    }
+
+    function setTaxImpl(address impl_) external onlyOwner {
+        if (impl_ == address(0)) revert ZeroAddress();
+        emit ImplUpdated("tax", taxImpl, impl_);
+        taxImpl = impl_;
+    }
+
+    function setReflectionImpl(address impl_) external onlyOwner {
+        if (impl_ == address(0)) revert ZeroAddress();
+        emit ImplUpdated("reflection", reflectionImpl, impl_);
+        reflectionImpl = impl_;
+    }
+
     function setVestingWallet(address vestingWallet_) external onlyOwner {
         if (vestingWallet_ == address(0)) revert ZeroAddress();
         emit VestingWalletUpdated(vestingWallet, vestingWallet_);
@@ -393,18 +404,6 @@ contract LaunchpadFactory {
         emit OwnershipTransferred(owner, msg.sender);
         owner        = msg.sender;
         pendingOwner = address(0);
-    }
-
-    function addManager(address manager_) external onlyOwner {
-        if (manager_ == address(0)) revert ZeroAddress();
-        managers[manager_] = true;
-        emit ManagerAdded(manager_);
-    }
-
-    function removeManager(address manager_) external onlyOwner {
-        if (!managers[manager_]) revert Unauthorized();
-        managers[manager_] = false;
-        emit ManagerRemoved(manager_);
     }
 
     function _distribute(address token, address bc, Alloc memory a) internal {
