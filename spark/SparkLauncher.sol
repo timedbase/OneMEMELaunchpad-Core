@@ -295,26 +295,25 @@ contract SparkLauncher {
         address quoteToken_,
         uint256 extraBuy_
     ) private returns (address pool, uint256 tokenId) {
-        DexConfig memory dex = dexes[factory_];
-        if (!dex.enabled) revert UnsupportedDex();
-
-        QuoteToken memory qt = quoteTokens[quoteToken_];
-        if (!qt.enabled) revert UnsupportedQuoteToken();
+        // Access dex/quote config directly from storage — avoids two memory-pointer stack slots
+        // that legacy codegen would keep live for the entire function body.
+        if (!dexes[factory_].enabled)       revert UnsupportedDex();
+        if (!quoteTokens[quoteToken_].enabled) revert UnsupportedQuoteToken();
 
         uint256 extraQuote;
 
         // Collect payment and route launch fee to platform wallet.
-        if (qt.isNative) {
-            if (msg.value < qt.launchFee) revert WrongFee();
+        if (quoteTokens[quoteToken_].isNative) {
+            if (msg.value < quoteTokens[quoteToken_].launchFee) revert WrongFee();
             IWETH(weth).deposit{value: msg.value}();
-            extraQuote = msg.value - qt.launchFee;
+            extraQuote = msg.value - quoteTokens[quoteToken_].launchFee;
         } else {
             if (msg.value != 0) revert UnexpectedETH();
-            _pullFrom(quoteToken_, msg.sender, qt.launchFee + extraBuy_);
+            _pullFrom(quoteToken_, msg.sender, quoteTokens[quoteToken_].launchFee + extraBuy_);
             extraQuote = extraBuy_;
         }
         // Fee goes to platform wallet — not into the pool.
-        _safeTransfer(quoteToken_, launchFeeWallet, qt.launchFee);
+        _safeTransfer(quoteToken_, launchFeeWallet, quoteTokens[quoteToken_].launchFee);
 
         // Determine token ordering (V3 requires token0 < token1 by address).
         (address token0, address token1) = token < quoteToken_
@@ -326,20 +325,22 @@ contract SparkLauncher {
 
         pool = IUniswapV3Factory(factory_).createPool(token0, token1, FEE_TIER);
 
-        // Initialise at a price targeting qt.marketCapRef for the full TOTAL_SUPPLY.
-        IUniswapV3Pool(pool).initialize(_computeSqrtPriceX96(token, quoteToken_, qt.marketCapRef));
+        // Initialise at a price targeting marketCapRef for the full TOTAL_SUPPLY.
+        IUniswapV3Pool(pool).initialize(
+            _computeSqrtPriceX96(token, quoteToken_, quoteTokens[quoteToken_].marketCapRef)
+        );
 
         // Tick setup + mint extracted to avoid stack-too-deep in legacy codegen.
-        tokenId = _mintLiquidity(dex.positionManager, token, token0, token1, pool);
+        tokenId = _mintLiquidity(dexes[factory_].positionManager, token, token0, token1, pool);
 
         locker.registerPosition(
             token, tokenId,
             feeWallet_ == address(0) ? msg.sender : feeWallet_,
-            token0, token1, pool, dex.positionManager
+            token0, token1, pool, dexes[factory_].positionManager
         );
 
         // Instant buy extracted to avoid stack-too-deep during ExactInputSingleParams construction.
-        if (extraQuote > 0) _doInstantBuy(dex.router, quoteToken_, token, extraQuote);
+        if (extraQuote > 0) _doInstantBuy(dexes[factory_].router, quoteToken_, token, extraQuote);
 
         // Creator allocation: ~0.01 % + any mint dust remaining in this contract.
         uint256 creatorTokens = ISparkToken(token).balanceOf(address(this));
