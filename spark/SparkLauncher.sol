@@ -330,13 +330,12 @@ contract SparkLauncher {
             _computeSqrtPriceX96(token, quoteToken_, quoteTokens[quoteToken_].marketCapRef)
         );
 
-        // Tick setup + mint extracted to avoid stack-too-deep in legacy codegen.
-        tokenId = _mintLiquidity(dexes[factory_].positionManager, token, token0, token1, pool);
-
-        locker.registerPosition(
-            token, tokenId,
+        // Tick setup, mint, and register extracted to avoid stack-too-deep in legacy codegen.
+        tokenId = _mintAndRegister(
+            dexes[factory_].positionManager,
+            token,
             feeWallet_ == address(0) ? msg.sender : feeWallet_,
-            token0, token1, pool, dexes[factory_].positionManager
+            token0, token1, pool
         );
 
         // Instant buy extracted to avoid stack-too-deep during ExactInputSingleParams construction.
@@ -379,54 +378,60 @@ contract SparkLauncher {
         }));
     }
 
-    // Reads the post-initialize tick, builds the one-sided tick range, approves, and mints
-    // the LP position. Extracted from _setupAndRegister to keep its stack depth in range.
-    function _mintLiquidity(
+    // Tick setup, mint, and locker registration in one frame.
+    // tick/amount vars are scoped to the inner block so they are popped before the
+    // 7-argument registerPosition call — keeping that call's stack depth in range.
+    function _mintAndRegister(
         address positionManager_,
         address token,
+        address feeWallet,
         address token0,
         address token1,
         address pool
     ) private returns (uint256 tokenId) {
-        int24   tickLower;
-        int24   tickUpper;
-        uint256 amount0Desired;
-        uint256 amount1Desired;
+        {
+            int24   tickLower;
+            int24   tickUpper;
+            uint256 amount0Desired;
+            uint256 amount1Desired;
 
-        // Reuse tickLower as a temp for currentTick — one fewer stack slot.
-        (, tickLower,,,,,) = IUniswapV3Pool(pool).slot0();
+            // Reuse tickLower as a temp for currentTick — one fewer stack slot.
+            (, tickLower,,,,,) = IUniswapV3Pool(pool).slot0();
 
-        if (token == token0) {
-            // SparkToken is token0 → held as token0 when currentTick >= tickUpper.
-            tickUpper      = _floorToTickSpacing(tickLower); // <= currentTick ✓
-            tickLower      = MIN_TICK;
-            amount0Desired = POOL_TOKENS;
-            amount1Desired = 0;
-        } else {
-            // SparkToken is token1 → held as token1 when currentTick < tickLower.
-            tickLower      = _floorToTickSpacing(tickLower) + TICK_SPACING; // > currentTick ✓
-            tickUpper      = MAX_TICK;
-            amount0Desired = 0;
-            amount1Desired = POOL_TOKENS;
-        }
+            if (token == token0) {
+                // SparkToken is token0 → held as token0 when currentTick >= tickUpper.
+                tickUpper      = _floorToTickSpacing(tickLower); // <= currentTick ✓
+                tickLower      = MIN_TICK;
+                amount0Desired = POOL_TOKENS;
+                amount1Desired = 0;
+            } else {
+                // SparkToken is token1 → held as token1 when currentTick < tickLower.
+                tickLower      = _floorToTickSpacing(tickLower) + TICK_SPACING; // > currentTick ✓
+                tickUpper      = MAX_TICK;
+                amount0Desired = 0;
+                amount1Desired = POOL_TOKENS;
+            }
 
-        _safeApprove(token, positionManager_, POOL_TOKENS);
+            _safeApprove(token, positionManager_, POOL_TOKENS);
 
-        (tokenId,,,) = INonfungiblePositionManager(positionManager_).mint(
-            INonfungiblePositionManager.MintParams({
-                token0:         token0,
-                token1:         token1,
-                fee:            FEE_TIER,
-                tickLower:      tickLower,
-                tickUpper:      tickUpper,
-                amount0Desired: amount0Desired,
-                amount1Desired: amount1Desired,
-                amount0Min:     0,
-                amount1Min:     0,
-                recipient:      address(locker),
-                deadline:       block.timestamp
-            })
-        );
+            (tokenId,,,) = INonfungiblePositionManager(positionManager_).mint(
+                INonfungiblePositionManager.MintParams({
+                    token0:         token0,
+                    token1:         token1,
+                    fee:            FEE_TIER,
+                    tickLower:      tickLower,
+                    tickUpper:      tickUpper,
+                    amount0Desired: amount0Desired,
+                    amount1Desired: amount1Desired,
+                    amount0Min:     0,
+                    amount1Min:     0,
+                    recipient:      address(locker),
+                    deadline:       block.timestamp
+                })
+            );
+        } // tickLower, tickUpper, amount0Desired, amount1Desired freed here
+
+        locker.registerPosition(token, tokenId, feeWallet, token0, token1, pool, positionManager_);
     }
 
     function _deployAndInit(
