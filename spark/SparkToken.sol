@@ -81,6 +81,12 @@ contract SparkToken {
         _owner = newOwner;
     }
 
+    function renounceOwnership() external {
+        if (msg.sender != _owner) revert NotOwner();
+        emit OwnershipTransferred(_owner, address(0));
+        _owner = address(0);
+    }
+
     function balanceOf(address account) external view returns (uint256) {
         return _balances[account];
     }

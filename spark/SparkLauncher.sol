@@ -3,7 +3,7 @@ pragma solidity ^0.8.32;
 
 interface ISparkToken {
     function initSpark(string calldata name_, string calldata symbol_, string calldata metaURI_, address launcher_) external;
-    function transferOwnership(address newOwner) external;
+    function renounceOwnership() external;
     function approve(address spender, uint256 amount) external returns (bool);
     function transfer(address to, uint256 amount) external returns (bool);
     function balanceOf(address account) external view returns (uint256);
@@ -28,6 +28,15 @@ interface IUniswapV3Factory {
 
 interface IUniswapV3Pool {
     function initialize(uint160 sqrtPriceX96) external;
+    function slot0() external view returns (
+        uint160 sqrtPriceX96,
+        int24   tick,
+        uint16  observationIndex,
+        uint16  observationCardinality,
+        uint16  observationCardinalityNext,
+        uint8   feeProtocol,
+        bool    unlocked
+    );
 }
 
 interface INonfungiblePositionManager {
@@ -83,11 +92,12 @@ contract SparkLauncher {
     error ApprovalFailed();
 
     uint256 public constant TOTAL_SUPPLY = 1_000_000_000e18;
-    uint256 public constant POOL_TOKENS  = 999_900_000e18; // 99.99 %; remaining ~0.01 % + dust → creator
+    uint256 public constant POOL_TOKENS  =   999_900_000e18; // 99.99 % seeded one-sided
 
-    uint24  private constant FEE_TIER   = 10_000;  // V3 1 % tier, tick spacing 200
-    int24   private constant TICK_LOWER = -887_200; // full-range: nearest multiple-of-200 within ±887272
-    int24   private constant TICK_UPPER =  887_200;
+    uint24 private constant FEE_TIER     = 10_000; // 1 % V3 tier
+    int24  private constant MIN_TICK     = -887_200;
+    int24  private constant MAX_TICK     =  887_200;
+    int24  private constant TICK_SPACING =  200;   // spacing for 1 % tier
 
     struct DexConfig {
         address positionManager;
@@ -96,19 +106,21 @@ contract SparkLauncher {
     }
 
     struct QuoteToken {
-        uint256 launchFee; // raw units of the token
+        uint256 launchFee;    // raw units of the token
+        uint256 marketCapRef; // reference amount (raw units) targeting the desired launch market cap
         uint8   decimals;
         bool    enabled;
-        bool    isNative;  // true → fee paid in ETH, WETH used in pool
+        bool    isNative;     // true → fee paid in ETH, WETH used as quote
     }
 
-    mapping(address => DexConfig)   public dexes;       // factory → DEX config
-    mapping(address => QuoteToken)  public quoteTokens;
+    mapping(address => DexConfig)  public dexes;
+    mapping(address => QuoteToken) public quoteTokens;
 
     address      public immutable weth;
     address      public immutable tokenImpl;
     ISparkLocker public immutable locker;
     address      public owner;
+    address      public launchFeeWallet; // receives platform launch fees
 
     event TokenLaunched(
         address indexed token,
@@ -121,8 +133,12 @@ contract SparkLauncher {
     );
     event DexAdded(address indexed factory, address positionManager, address router);
     event DexDisabled(address indexed factory);
-    event QuoteTokenAdded(address indexed token, uint256 fee, uint8 decimals);
+    event QuoteTokenAdded(address indexed token, uint256 fee, uint8 decimals, uint256 marketCapRef);
     event QuoteTokenDisabled(address indexed token);
+    event LaunchFeeWalletSet(address indexed wallet);
+    event LaunchFeeSet(address indexed token, uint256 fee);
+    event MarketCapRefSet(address indexed token, uint256 marketCapRef);
+    event DecimalsSet(address indexed token, uint8 decimals);
 
     modifier onlyOwner() { if (msg.sender != owner) revert NotOwner(); _; }
 
@@ -130,6 +146,7 @@ contract SparkLauncher {
         address weth_,
         address tokenImpl_,
         address locker_,
+        address launchFeeWallet_,
         address initialFactory_,
         address initialPositionMgr_,
         address initialRouter_
@@ -137,14 +154,16 @@ contract SparkLauncher {
         if (weth_               == address(0)) revert ZeroAddress();
         if (tokenImpl_          == address(0)) revert ZeroAddress();
         if (locker_             == address(0)) revert ZeroAddress();
+        if (launchFeeWallet_    == address(0)) revert ZeroAddress();
         if (initialFactory_     == address(0)) revert ZeroAddress();
         if (initialPositionMgr_ == address(0)) revert ZeroAddress();
         if (initialRouter_      == address(0)) revert ZeroAddress();
 
-        owner     = msg.sender;
-        weth      = weth_;
-        tokenImpl = tokenImpl_;
-        locker    = ISparkLocker(locker_);
+        owner           = msg.sender;
+        weth            = weth_;
+        tokenImpl       = tokenImpl_;
+        locker          = ISparkLocker(locker_);
+        launchFeeWallet = launchFeeWallet_;
 
         dexes[initialFactory_] = DexConfig({
             positionManager: initialPositionMgr_,
@@ -154,10 +173,11 @@ contract SparkLauncher {
         emit DexAdded(initialFactory_, initialPositionMgr_, initialRouter_);
 
         quoteTokens[weth_] = QuoteToken({
-            launchFee: 0.0005 ether,
-            decimals:  18,
-            enabled:   true,
-            isNative:  true
+            launchFee:    0.0005 ether,
+            marketCapRef: 5e18,          // ~5 ETH market cap at launch
+            decimals:     18,
+            enabled:      true,
+            isNative:     true
         });
     }
 
@@ -166,9 +186,33 @@ contract SparkLauncher {
         owner = newOwner;
     }
 
-    function addDex(address factory_, address positionMgr_, address router_)
-        external onlyOwner
-    {
+    function setLaunchFeeWallet(address wallet) external onlyOwner {
+        if (wallet == address(0)) revert ZeroAddress();
+        launchFeeWallet = wallet;
+        emit LaunchFeeWalletSet(wallet);
+    }
+
+    function setLaunchFee(address token_, uint256 fee_) external onlyOwner {
+        if (!quoteTokens[token_].enabled) revert UnsupportedQuoteToken();
+        if (fee_ == 0) revert ZeroAmount();
+        quoteTokens[token_].launchFee = fee_;
+        emit LaunchFeeSet(token_, fee_);
+    }
+
+    function setMarketCapRef(address token_, uint256 ref_) external onlyOwner {
+        if (!quoteTokens[token_].enabled) revert UnsupportedQuoteToken();
+        if (ref_ == 0) revert ZeroAmount();
+        quoteTokens[token_].marketCapRef = ref_;
+        emit MarketCapRefSet(token_, ref_);
+    }
+
+    function setDecimals(address token_, uint8 decimals_) external onlyOwner {
+        if (!quoteTokens[token_].enabled) revert UnsupportedQuoteToken();
+        quoteTokens[token_].decimals = decimals_;
+        emit DecimalsSet(token_, decimals_);
+    }
+
+    function addDex(address factory_, address positionMgr_, address router_) external onlyOwner {
         if (factory_     == address(0)) revert ZeroAddress();
         if (positionMgr_ == address(0)) revert ZeroAddress();
         if (router_      == address(0)) revert ZeroAddress();
@@ -186,24 +230,29 @@ contract SparkLauncher {
         emit DexDisabled(factory_);
     }
 
+    function addQuoteToken(
+        address token_,
+        uint256 fee_,
+        uint8   decimals_,
+        uint256 marketCapRef_
+    ) external onlyOwner {
+        if (token_        == address(0)) revert ZeroAddress();
+        if (fee_          == 0)          revert ZeroAmount();
+        if (marketCapRef_ == 0)          revert ZeroAmount();
+        quoteTokens[token_] = QuoteToken({
+            launchFee:    fee_,
+            marketCapRef: marketCapRef_,
+            decimals:     decimals_,
+            enabled:      true,
+            isNative:     (token_ == weth)
+        });
+        emit QuoteTokenAdded(token_, fee_, decimals_, marketCapRef_);
+    }
+
     function disableQuoteToken(address token_) external onlyOwner {
         if (!quoteTokens[token_].enabled) revert UnsupportedQuoteToken();
         quoteTokens[token_].enabled = false;
         emit QuoteTokenDisabled(token_);
-    }
-
-    function addQuoteToken(address token_, uint256 fee_, uint8 decimals_)
-        external onlyOwner
-    {
-        if (token_ == address(0)) revert ZeroAddress();
-        if (fee_   == 0)          revert ZeroAmount();
-        quoteTokens[token_] = QuoteToken({
-            launchFee: fee_,
-            decimals:  decimals_,
-            enabled:   true,
-            isNative:  (token_ == weth)
-        });
-        emit QuoteTokenAdded(token_, fee_, decimals_);
     }
 
     function launch(
@@ -213,17 +262,12 @@ contract SparkLauncher {
         address         feeWallet_,
         address         factory_,
         address         quoteToken_,
-        uint256         extraBuy_
+        uint256         extraBuy_    // extra quote tokens for instant buy (ERC-20 only; native uses msg.value excess)
     ) external payable returns (address token, address pool, uint256 tokenId) {
-        // Deploy while string params are still near the top of the EVM stack (13 slots total
-        // here vs 22+ if deferred past the address/uint locals below). The remaining work is
-        // delegated to _setupAndRegister so those string slots never appear in the same frame.
         token = _deployAndInit(name_, symbol_, metaURI_);
         (pool, tokenId) = _setupAndRegister(token, feeWallet_, factory_, quoteToken_, extraBuy_);
     }
 
-    // Contains all post-deploy launch logic. Separated from launch() so the three string
-    // calldata params (6 stack slots) are absent, keeping peak stack depth within the EVM limit.
     function _setupAndRegister(
         address token,
         address feeWallet_,
@@ -236,88 +280,108 @@ contract SparkLauncher {
 
         address feeWallet = feeWallet_ == address(0) ? msg.sender : feeWallet_;
 
-        // Scope qt to free its stack slot after fee collection.
-        uint256 quoteFee;
-        {
-            QuoteToken memory qt = quoteTokens[quoteToken_];
-            if (!qt.enabled) revert UnsupportedQuoteToken();
-            quoteFee = qt.launchFee;
-            if (qt.isNative) {
-                if (msg.value < quoteFee) revert WrongFee();
-                IWETH(weth).deposit{value: msg.value}();
-            } else {
-                if (msg.value != 0) revert UnexpectedETH();
-                _pullFrom(quoteToken_, msg.sender, quoteFee + extraBuy_);
-            }
+        QuoteToken memory qt = quoteTokens[quoteToken_];
+        if (!qt.enabled) revert UnsupportedQuoteToken();
+
+        uint256 quoteFee   = qt.launchFee;
+        uint256 extraQuote; // amount of quoteToken available for instant buy
+
+        // Collect payment and route launch fee to platform wallet.
+        if (qt.isNative) {
+            if (msg.value < quoteFee) revert WrongFee();
+            IWETH(weth).deposit{value: msg.value}();
+            extraQuote = msg.value - quoteFee;
+        } else {
+            if (msg.value != 0) revert UnexpectedETH();
+            _pullFrom(quoteToken_, msg.sender, quoteFee + extraBuy_);
+            extraQuote = extraBuy_;
+        }
+        // Fee goes to platform wallet — not into the pool.
+        _safeTransfer(quoteToken_, launchFeeWallet, quoteFee);
+
+        // Determine token ordering (V3 requires token0 < token1 by address).
+        (address token0, address token1) = token < quoteToken_
+            ? (token,       quoteToken_)
+            : (quoteToken_, token      );
+
+        if (IUniswapV3Factory(factory_).getPool(token0, token1, FEE_TIER) != address(0))
+            revert PoolAlreadyExists();
+
+        pool = IUniswapV3Factory(factory_).createPool(token0, token1, FEE_TIER);
+
+        // Initialise at a price targeting qt.marketCapRef for the full TOTAL_SUPPLY.
+        IUniswapV3Pool(pool).initialize(_computeSqrtPriceX96(token, quoteToken_, qt.marketCapRef));
+
+        // Read the initialised tick so we can build a one-sided tick range.
+        (, int24 currentTick,,,,,) = IUniswapV3Pool(pool).slot0();
+
+        // One-sided mint: only SparkToken enters the pool.
+        //   SparkToken = token0 → position held as token0 when currentTick >= tickUpper.
+        //   SparkToken = token1 → position held as token1 when currentTick <  tickLower.
+        int24   tickLower;
+        int24   tickUpper;
+        uint256 amount0Desired;
+        uint256 amount1Desired;
+
+        if (token < quoteToken_) {
+            tickLower      = MIN_TICK;
+            tickUpper      = _floorToTickSpacing(currentTick); // <= currentTick ✓
+            amount0Desired = POOL_TOKENS;
+            amount1Desired = 0;
+        } else {
+            tickLower      = _floorToTickSpacing(currentTick) + TICK_SPACING; // > currentTick ✓
+            tickUpper      = MAX_TICK;
+            amount0Desired = 0;
+            amount1Desired = POOL_TOKENS;
         }
 
-        // Scope pool-setup locals (token0/1, a0/1) to free them after registration.
-        {
-            (address token0, address token1, uint256 a0, uint256 a1) = quoteToken_ < token
-                ? (quoteToken_, token,  quoteFee,    POOL_TOKENS)
-                : (token,        quoteToken_, POOL_TOKENS, quoteFee);
+        _safeApprove(token, dex.positionManager, POOL_TOKENS);
 
-            if (IUniswapV3Factory(factory_).getPool(token0, token1, FEE_TIER) != address(0))
-                revert PoolAlreadyExists();
-            pool = IUniswapV3Factory(factory_).createPool(token0, token1, FEE_TIER);
-            IUniswapV3Pool(pool).initialize(_sqrtPriceX96(a0, a1));
+        (tokenId,,,) = INonfungiblePositionManager(dex.positionManager).mint(
+            INonfungiblePositionManager.MintParams({
+                token0:         token0,
+                token1:         token1,
+                fee:            FEE_TIER,
+                tickLower:      tickLower,
+                tickUpper:      tickUpper,
+                amount0Desired: amount0Desired,
+                amount1Desired: amount1Desired,
+                amount0Min:     0,
+                amount1Min:     0,
+                recipient:      address(locker),
+                deadline:       block.timestamp
+            })
+        );
 
-            _safeApprove(quoteToken_, dex.positionManager, quoteFee);
-            _safeApprove(token,       dex.positionManager, POOL_TOKENS);
+        locker.registerPosition(token, tokenId, feeWallet, token0, token1, pool, dex.positionManager);
 
-            (tokenId, , , ) = INonfungiblePositionManager(dex.positionManager).mint(
-                INonfungiblePositionManager.MintParams({
-                    token0:         token0,
-                    token1:         token1,
-                    fee:            FEE_TIER,
-                    tickLower:      TICK_LOWER,
-                    tickUpper:      TICK_UPPER,
-                    amount0Desired: a0,
-                    amount1Desired: a1,
-                    amount0Min:     0,
-                    amount1Min:     0,
-                    recipient:      address(locker),
-                    deadline:       block.timestamp
-                })
-            );
-
-            locker.registerPosition(
-                token, tokenId, feeWallet, token0, token1, pool, dex.positionManager
-            );
+        // Instant buy: swap any excess quote tokens for SparkTokens → creator.
+        if (extraQuote > 0) {
+            _safeApprove(quoteToken_, dex.router, extraQuote);
+            ISwapRouter(dex.router).exactInputSingle(ISwapRouter.ExactInputSingleParams({
+                tokenIn:           quoteToken_,
+                tokenOut:          token,
+                fee:               FEE_TIER,
+                recipient:         msg.sender,
+                deadline:          block.timestamp,
+                amountIn:          extraQuote,
+                amountOutMinimum:  0,
+                sqrtPriceLimitX96: 0
+            }));
         }
 
-        // Scope quoteDust to free its slot before the creator-token transfer.
-        {
-            uint256 quoteDust = _balanceOf(quoteToken_, address(this));
-            if (quoteDust > 0) {
-                _safeApprove(quoteToken_, dex.router, quoteDust);
-                ISwapRouter(dex.router).exactInputSingle(ISwapRouter.ExactInputSingleParams({
-                    tokenIn:           quoteToken_,
-                    tokenOut:          token,
-                    fee:               FEE_TIER,
-                    recipient:         msg.sender,
-                    deadline:          block.timestamp,
-                    amountIn:          quoteDust,
-                    amountOutMinimum:  0,
-                    sqrtPriceLimitX96: 0
-                }));
-            }
-        }
+        // Creator allocation: ~0.01 % + any mint dust remaining in this contract.
+        uint256 creatorTokens = ISparkToken(token).balanceOf(address(this));
+        if (creatorTokens > 0) ISparkToken(token).transfer(msg.sender, creatorTokens);
 
-        {
-            uint256 creatorTokens = ISparkToken(token).balanceOf(address(this));
-            if (creatorTokens > 0) ISparkToken(token).transfer(msg.sender, creatorTokens);
-        }
-
-        ISparkToken(token).transferOwnership(msg.sender);
+        // Renounce ownership immediately — token is permanently ownerless after launch.
+        ISparkToken(token).renounceOwnership();
 
         emit TokenLaunched(token, msg.sender, factory_, quoteToken_, feeWallet, pool, tokenId);
     }
 
     receive() external payable {}
 
-    // Isolated so the three string calldata params stay near the top of the EVM stack
-    // when initSpark is called, avoiding stack-too-deep in launch().
     function _deployAndInit(
         string calldata name_,
         string calldata symbol_,
@@ -327,9 +391,29 @@ contract SparkLauncher {
         ISparkToken(token).initSpark(name_, symbol_, metaURI_, address(this));
     }
 
+    // sqrtPriceX96 targeting marketCapRef_ for TOTAL_SUPPLY, adjusted for token ordering.
+    function _computeSqrtPriceX96(address sparkToken, address quoteToken_, uint256 marketCapRef_)
+        private pure returns (uint160)
+    {
+        // price = token1 / token0
+        if (sparkToken < quoteToken_) {
+            // sparkToken = token0, quote = token1 → price = marketCapRef_ / TOTAL_SUPPLY (very small)
+            return _sqrtPriceX96(TOTAL_SUPPLY, marketCapRef_);
+        } else {
+            // quote = token0, sparkToken = token1 → price = TOTAL_SUPPLY / marketCapRef_ (very large)
+            return _sqrtPriceX96(marketCapRef_, TOTAL_SUPPLY);
+        }
+    }
+
+    // Floor tick down to the nearest TICK_SPACING multiple (handles negative ticks correctly).
+    function _floorToTickSpacing(int24 tick) private pure returns (int24) {
+        int24 compressed = tick / TICK_SPACING;
+        // Solidity truncates towards zero; subtract 1 for negative non-multiples.
+        if (tick < 0 && tick % TICK_SPACING != 0) compressed--;
+        return compressed * TICK_SPACING;
+    }
+
     // EIP-1167 minimal proxy — 55-byte deployment (10 creation + 45 runtime).
-    //   creation : 3d602d80600a3d3981f3
-    //   runtime  : 363d3d373d3d3d363d73 <impl 20 bytes> 5af43d82803e903d91602b57fd5bf3
     function _clone(address impl) private returns (address instance) {
         assembly {
             let ptr := mload(0x40)
@@ -347,9 +431,7 @@ contract SparkLauncher {
     // Two-step to avoid 2^192 overflow:
     //   scaled = (amount1 << 96) / amount0   →  price × 2^96
     //   sqrt(scaled) << 48                   →  sqrt(price) × 2^96  ✓
-    function _sqrtPriceX96(uint256 amount0, uint256 amount1)
-        private pure returns (uint160)
-    {
+    function _sqrtPriceX96(uint256 amount0, uint256 amount1) private pure returns (uint160) {
         uint256 scaled = (amount1 << 96) / amount0;
         return uint160(_sqrt(scaled) << 48);
     }
@@ -364,9 +446,9 @@ contract SparkLauncher {
 
     // Reset allowance to 0 before setting — handles USDT's non-zero→non-zero restriction.
     function _safeApprove(address token_, address spender, uint256 amount) private {
-        (bool _ok,) = token_.call(abi.encodeWithSelector(0x095ea7b3, spender, 0)); // approve(address,uint256)
+        (bool _ok,) = token_.call(abi.encodeWithSelector(0x095ea7b3, spender, 0));
         _ok;
-        (bool ok, ) = token_.call(abi.encodeWithSelector(0x095ea7b3, spender, amount));
+        (bool ok,)  = token_.call(abi.encodeWithSelector(0x095ea7b3, spender, amount));
         if (!ok) revert ApprovalFailed();
     }
 
@@ -378,11 +460,12 @@ contract SparkLauncher {
         if (!ok || (data.length > 0 && !abi.decode(data, (bool)))) revert TransferFailed();
     }
 
-    // balanceOf(address) — returns 0 on failure
-    function _balanceOf(address token_, address account) private view returns (uint256 bal) {
-        (bool ok, bytes memory data) = token_.staticcall(
-            abi.encodeWithSelector(0x70a08231, account)
+    // transfer(address,uint256) — USDT-safe (handles missing return value).
+    function _safeTransfer(address token_, address to, uint256 amount) private {
+        if (amount == 0) return;
+        (bool ok, bytes memory data) = token_.call(
+            abi.encodeWithSelector(0xa9059cbb, to, amount)
         );
-        if (ok && data.length >= 32) bal = abi.decode(data, (uint256));
+        if (!ok || (data.length > 0 && !abi.decode(data, (bool)))) revert TransferFailed();
     }
 }

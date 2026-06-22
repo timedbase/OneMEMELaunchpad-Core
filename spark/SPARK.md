@@ -1,6 +1,6 @@
 # Spark — Token Launcher
 
-Spark lets anyone deploy a meme token and seed permanent V3 liquidity in a single transaction on any registered DEX. Liquidity is locked forever in SparkLocker; only accrued swap fees can be claimed.
+Spark lets anyone deploy a meme token and seed permanent one-sided V3 liquidity in a single transaction on any registered DEX. Liquidity is locked forever in SparkLocker; only accrued swap fees can be claimed.
 
 ---
 
@@ -9,7 +9,7 @@ Spark lets anyone deploy a meme token and seed permanent V3 liquidity in a singl
 | File | Contract | Role |
 |------|----------|------|
 | `SparkToken.sol` | `SparkToken` | ERC-20 + EIP-2612 implementation used as the EIP-1167 clone template |
-| `SparkLauncher.sol` | `SparkLauncher` | Orchestrates every launch — clones token, creates pool, seeds liquidity |
+| `SparkLauncher.sol` | `SparkLauncher` | Orchestrates every launch — clones token, creates pool, seeds one-sided liquidity |
 | `SparkLocker.sol` | `SparkLocker` | Permanent LP-NFT vault; distributes swap fees to creator, platform, and charity |
 
 ---
@@ -27,11 +27,13 @@ SparkLauncher
   ├─ clone(SparkToken impl)  →  SparkToken (1 B supply minted to launcher)
   ├─ WETH.deposit(msg.value)               [native quote]
   │  OR transferFrom(creator, fee+extraBuy) [ERC-20 quote]
+  ├─ transfer(launchFee → launchFeeWallet)  ← fee never enters the pool
   ├─ V3Factory.createPool(quoteToken, sparkToken, 1%)
-  ├─ pool.initialize(sqrtPriceX96)
-  ├─ positionManager.mint(fullRange)  →  LP NFT  →  SparkLocker
+  ├─ pool.initialize(computeSqrtPriceX96)  →  ~5 ETH market cap price
+  ├─ pool.slot0()  →  currentTick  →  compute one-sided tick range
+  ├─ positionManager.mint(one-sided: SparkToken only)  →  LP NFT  →  SparkLocker
   ├─ SparkLocker.registerPosition(token, tokenId, feeWallet, token0, token1, pool, positionManager)
-  ├─ swapRouter.exactInputSingle(quoteDust → sparkToken → creator)
+  ├─ swapRouter.exactInputSingle(extraQuote → sparkToken → creator)  [if extraQuote > 0]
   └─ transfer(remainingSparkTokens → creator)
 
 SparkLocker  (holds LP NFTs forever)
@@ -44,25 +46,41 @@ SparkLocker  (holds LP NFTs forever)
 
 1. **Validate** — launcher checks the factory is in the DEX registry and the quote token is registered.
 
-2. **Fee collection**
-   - `WETH` (native): send `ETH >= launchFee`. The launcher wraps the full `msg.value` to WETH. Any ETH above the fee becomes `extraBuy`.
-   - ERC-20: send 0 ETH, approve `launchFee + extraBuy` beforehand; launcher pulls via `transferFrom`.
+2. **Fee collection & routing**
+   - `WETH` (native): send `ETH >= launchFee`. The launcher wraps the full `msg.value` to WETH. The `launchFee` portion is transferred to `launchFeeWallet`; any ETH above the fee becomes `extraQuote` for the instant buy.
+   - ERC-20: send 0 ETH, approve `launchFee + extraBuy` beforehand; launcher pulls via `transferFrom`. The `launchFee` is sent to `launchFeeWallet`; `extraBuy` is reserved for the instant buy.
 
-3. **Token deployment** — an EIP-1167 minimal-proxy clone of `SparkToken` is deployed and `initSpark` is called. `metaURI` is written, **1 000 000 000** tokens are minted to the launcher, and no owner is ever assigned — the token is permanently ownerless.
+3. **Token deployment** — an EIP-1167 minimal-proxy clone of `SparkToken` is deployed and `initSpark` is called. `metaURI` is written, **1 000 000 000** tokens are minted to the launcher.
 
-4. **Pool creation** — a V3 pool (`quoteToken / SparkToken`, **1 % fee tier**) is created on the chosen DEX and initialised at the price implied by the seeded amounts. Reverts with `PoolAlreadyExists` if that pair already has a 1 % pool on the same factory.
+4. **Pool creation** — a V3 pool (`quoteToken / SparkToken`, **1 % fee tier**) is created on the chosen DEX and initialised at a price targeting a ~5 ETH market cap (`MARKET_CAP_REF / TOTAL_SUPPLY`). Reverts with `PoolAlreadyExists` if that pair already has a 1 % pool on the same factory.
 
-5. **Liquidity seeding** — a full-range position (`tick −887 200 → +887 200`) is minted:
-   - **99.99 %** of supply (999 900 000 tokens)
-   - **100 %** of the launch fee in the chosen quote token
+5. **One-sided liquidity seeding** — the current tick is read from `pool.slot0()` immediately after initialisation and used to compute a one-sided tick range:
 
-   The LP NFT goes directly to `SparkLocker` and is never transferable out.
+   - **SparkToken = token0** (lower address): `tickLower = −887 200`, `tickUpper = floor(currentTick / 200) × 200` → position is entirely in token0 (SparkToken) since `currentTick ≥ tickUpper`.
+   - **SparkToken = token1** (higher address): `tickLower = floor(currentTick / 200) × 200 + 200`, `tickUpper = +887 200` → position is entirely in token1 (SparkToken) since `currentTick < tickLower`.
+
+   **99.99 %** of supply (999 900 000 tokens) is deposited. No quote token enters the pool. The LP NFT goes directly to `SparkLocker`.
 
 6. **Locker registration** — `SparkLocker.registerPosition` records the NFT id, fee wallet, pool address, and position manager for this launch.
 
-7. **Instant buy** — any remaining quote-token balance (rounding dust + any `extraBuy`) is swapped through the new pool via `exactInputSingle`. Purchased tokens go straight to the creator atomically with the launch.
+7. **Instant buy** — if any `extraQuote` remains (excess ETH or ERC-20 `extraBuy`), it is swapped through the new pool via `exactInputSingle`. Purchased tokens go straight to the creator atomically with the launch.
 
 8. **Creator allocation** — the remaining ~0.01 % of supply (100 000 tokens + pool-mint dust) is sent to the creator.
+
+---
+
+## Price Initialisation
+
+The pool is initialised at a price corresponding to a **~5 ETH market cap** for the full 1 B token supply. The computation adjusts for which address becomes `token0`:
+
+```
+SparkToken < quoteToken  →  price = MARKET_CAP_REF / TOTAL_SUPPLY  (small)
+quoteToken < SparkToken  →  price = TOTAL_SUPPLY / MARKET_CAP_REF  (large)
+```
+
+`MARKET_CAP_REF = 5e18` (5 WETH in raw units). For non-WETH quote tokens the same constant is used as an approximation; update via `addQuoteToken` if a different fee scale is needed.
+
+The `sqrtPriceX96` is derived using the two-step overflow-safe formula (see *sqrtPriceX96 Derivation* below).
 
 ---
 
@@ -93,21 +111,30 @@ Quote tokens are DEX-agnostic — the same token (e.g. USDC) can be used on any 
 |----------|-------------|
 | `addQuoteToken(token, fee, decimals)` | Register or update a quote token |
 | `disableQuoteToken(token)` | Block new launches using this token |
+| `setLaunchFee(token, fee)` | Update the launch fee for an already-registered quote token |
 
 | Quote token | Default fee | Payment method |
 |-------------|-------------|----------------|
 | WETH | 0.0005 ETH | ETH sent with tx (wrapped automatically) |
-| USDC | 1 USDC (1 000 000 raw) | `transferFrom` |
-| USDT | 1 USDT (1 000 000 raw) | `transferFrom` |
+| USDC | Set by owner | `transferFrom` |
+| WBTC | Set by owner | `transferFrom` |
 | Any ERC-20 | Set by owner | `transferFrom` |
 
 `isNative` is always `true` when the token address equals WETH, regardless of what `addQuoteToken` sets.
 
 ---
 
-## Fee Wallet & Claiming
+## Launch Fee Wallet
 
-- Set by the creator at launch; defaults to `msg.sender` if `address(0)` is passed.
+`launchFeeWallet` is a platform-level address that receives the launch fee for every token deployed. It is set in the constructor and updatable by the owner via `setLaunchFeeWallet`.
+
+This is separate from the per-launch `feeWallet` stored in SparkLocker, which receives the creator's share of ongoing LP swap fees.
+
+---
+
+## Fee Wallet & Claiming (SparkLocker)
+
+- The per-launch `feeWallet` is set by the creator at launch; defaults to `msg.sender` if `address(0)` is passed.
 - **Only the fee wallet OR the platform owner** may call `claimFees(token)`.
 - The platform owner may also call `claimAllFees()` or `claimFeesRange(from, to)` to sweep positions in bulk.
 
@@ -130,7 +157,7 @@ pendingCreatorFees(address token)
     returns (address token0, address token1, uint256 amount0, uint256 amount1)
 ```
 
-Returns the creator's share of currently uncollected fees, computed using the full Uniswap V3 fee-growth formula without modifying state. Values reflect `creatorBps %` of the total pending fees for each pool token.
+Returns the creator's share of currently uncollected fees, computed using the full Uniswap V3 fee-growth formula without modifying state.
 
 ---
 
@@ -140,8 +167,7 @@ Each launched token is an EIP-1167 clone of the `SparkToken` implementation cont
 
 - Standard ERC-20, 18 decimals, 1 B fixed supply — no mint, no burn, no tax
 - EIP-2612 `permit` for gasless approvals and DEX aggregator support
-- `metaURI()` — set once at `initSpark`, immutable thereafter
-- No owner ever assigned — permanently ownerless once `initSpark` returns
+- `metaURI()` — set once at `initSpark`, updatable by owner thereafter
 - Implementation constructor sets `_initialized = true` to block direct use
 
 ---
@@ -164,6 +190,7 @@ constructor(
     address weth_,               // WETH contract
     address tokenImpl_,          // SparkToken implementation (deployed separately)
     address locker_,             // SparkLocker (set its launcher to this address after deploy)
+    address launchFeeWallet_,    // Platform wallet that receives per-launch fees
     address initialFactory_,     // Factory of the first supported V3 DEX
     address initialPositionMgr_, // Position manager of the first supported V3 DEX
     address initialRouter_       // Swap router of the first supported V3 DEX
@@ -176,9 +203,10 @@ constructor(
 
 1. Deploy `SparkToken` implementation (no constructor args)
 2. Deploy `SparkLocker(platformWallet, charityWallet)`
-3. Deploy `SparkLauncher(weth, tokenImpl, locker, factory, positionMgr, router)`
+3. Deploy `SparkLauncher(weth, tokenImpl, locker, launchFeeWallet, factory, positionMgr, router)`
 4. Call `SparkLocker.setLauncher(sparkLauncher)`
 5. Call `SparkLauncher.addDex(...)` for each additional DEX
+6. Call `SparkLauncher.addQuoteToken(...)` for USDC, WBTC, or other supported assets
 
 ---
 
@@ -192,13 +220,15 @@ constructor(
 | `disableDex(factory)` | Prevent new launches on this factory |
 | `addQuoteToken(token, fee, decimals)` | Register or update an accepted quote token |
 | `disableQuoteToken(token)` | Prevent new launches using this quote token |
+| `setLaunchFee(token, fee)` | Update launch fee for an existing quote token |
+| `setLaunchFeeWallet(wallet)` | Update the platform launch-fee recipient |
 | `transferOwnership(newOwner)` | Transfer launcher admin |
 
 ### SparkLauncher (public)
 
 | Function | Description |
 |----------|-------------|
-| `launch(name, symbol, metaURI, feeWallet, factory, quoteToken, extraBuy) payable` | Deploy token, seed pool, lock LP — returns `(token, pool, tokenId)` |
+| `launch(name, symbol, metaURI, feeWallet, factory, quoteToken, extraBuy) payable` | Deploy token, seed one-sided pool, lock LP — returns `(token, pool, tokenId)` |
 
 ### SparkLocker (owner)
 
@@ -233,7 +263,7 @@ Standard ERC-20 (`transfer`, `transferFrom`, `approve`, `allowance`, `balanceOf`
 
 | Function | Description |
 |----------|-------------|
-| `metaURI()` | Returns the token's metadata URI (immutable after init) |
+| `metaURI()` | Returns the token's metadata URI |
 | `permit(owner, spender, value, deadline, v, r, s)` | EIP-2612 gasless approval |
 | `DOMAIN_SEPARATOR()` | EIP-712 domain separator (chain-fork safe) |
 
@@ -241,13 +271,15 @@ Standard ERC-20 (`transfer`, `transferFrom`, `approve`, `allowance`, `balanceOf`
 
 ## Key Constants (SparkLauncher)
 
-| Constant | Value |
-|----------|-------|
-| `TOTAL_SUPPLY` | 1 000 000 000 × 10¹⁸ |
-| `POOL_TOKENS` | 999 900 000 × 10¹⁸ (99.99 %) |
-| `FEE_TIER` | 10 000 (1 % V3 tier, tick spacing 200) |
-| `TICK_LOWER` | −887 200 |
-| `TICK_UPPER` | +887 200 |
+| Constant | Value | Notes |
+|----------|-------|-------|
+| `TOTAL_SUPPLY` | 1 000 000 000 × 10¹⁸ | Fixed supply per token |
+| `POOL_TOKENS` | 999 900 000 × 10¹⁸ (99.99 %) | Seeded one-sided into V3 |
+| `MARKET_CAP_REF` | 5 × 10¹⁸ (5 ETH) | Reference for price init |
+| `FEE_TIER` | 10 000 (1 % V3 tier) | Tick spacing 200 |
+| `MIN_TICK` | −887 200 | Floor tick for 1 % tier |
+| `MAX_TICK` | +887 200 | Ceiling tick for 1 % tier |
+| `TICK_SPACING` | 200 | Required by 1 % fee tier |
 
 ---
 
@@ -261,7 +293,25 @@ sqrt(scaled)     = sqrt(price) × 2^48
 sqrt(scaled) << 48 = sqrt(price) × 2^96         ✓  (= sqrtPriceX96)
 ```
 
-Max intermediate: `POOL_TOKENS × 2^96 ≈ 7.92 × 10⁵⁵ ≪ 2^256`. Safe for all valid quote token amounts (minimum fee is 1 raw unit, enforced by `ZeroAmount`).
+Max intermediate: `TOTAL_SUPPLY × 2^96 ≈ 7.92 × 10⁵⁵ ≪ 2^256`. Safe for all valid quote token amounts.
+
+---
+
+## One-Sided Tick Range
+
+After `pool.initialize(sqrtPriceX96)`, `pool.slot0()` returns `currentTick`. The floor function handles negative ticks (Solidity truncates towards zero):
+
+```
+floorToTickSpacing(tick):
+    compressed = tick / TICK_SPACING
+    if tick < 0 && tick % TICK_SPACING != 0: compressed -= 1
+    return compressed * TICK_SPACING
+```
+
+| SparkToken ordering | tickLower | tickUpper | V3 condition met |
+|---------------------|-----------|-----------|-----------------|
+| token0 (lower addr) | −887 200 | `floor(currentTick)` | `currentTick ≥ tickUpper` → all token0 |
+| token1 (higher addr) | `floor(currentTick) + 200` | +887 200 | `currentTick < tickLower` → all token1 |
 
 ---
 
