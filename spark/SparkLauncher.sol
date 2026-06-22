@@ -329,46 +329,8 @@ contract SparkLauncher {
         // Initialise at a price targeting qt.marketCapRef for the full TOTAL_SUPPLY.
         IUniswapV3Pool(pool).initialize(_computeSqrtPriceX96(token, quoteToken_, qt.marketCapRef));
 
-        // One-sided mint: only SparkToken enters the pool.
-        //   SparkToken = token0 → position held as token0 when currentTick >= tickUpper.
-        //   SparkToken = token1 → position held as token1 when currentTick <  tickLower.
-        int24   tickLower;
-        int24   tickUpper;
-        uint256 amount0Desired;
-        uint256 amount1Desired;
-
-        // Reuse tickLower as a temporary for currentTick to avoid an extra stack slot.
-        (, tickLower,,,,,) = IUniswapV3Pool(pool).slot0();
-
-        if (token < quoteToken_) {
-            tickUpper      = _floorToTickSpacing(tickLower); // <= currentTick ✓
-            tickLower      = MIN_TICK;
-            amount0Desired = POOL_TOKENS;
-            amount1Desired = 0;
-        } else {
-            tickLower      = _floorToTickSpacing(tickLower) + TICK_SPACING; // > currentTick ✓
-            tickUpper      = MAX_TICK;
-            amount0Desired = 0;
-            amount1Desired = POOL_TOKENS;
-        }
-
-        _safeApprove(token, dex.positionManager, POOL_TOKENS);
-
-        (tokenId,,,) = INonfungiblePositionManager(dex.positionManager).mint(
-            INonfungiblePositionManager.MintParams({
-                token0:         token0,
-                token1:         token1,
-                fee:            FEE_TIER,
-                tickLower:      tickLower,
-                tickUpper:      tickUpper,
-                amount0Desired: amount0Desired,
-                amount1Desired: amount1Desired,
-                amount0Min:     0,
-                amount1Min:     0,
-                recipient:      address(locker),
-                deadline:       block.timestamp
-            })
-        );
+        // Tick setup + mint extracted to avoid stack-too-deep in legacy codegen.
+        tokenId = _mintLiquidity(dex.positionManager, token, token0, token1, pool);
 
         address feeWallet = feeWallet_ == address(0) ? msg.sender : feeWallet_;
         locker.registerPosition(token, tokenId, feeWallet, token0, token1, pool, dex.positionManager);
@@ -399,6 +361,56 @@ contract SparkLauncher {
     }
 
     receive() external payable {}
+
+    // Reads the post-initialize tick, builds the one-sided tick range, approves, and mints
+    // the LP position. Extracted from _setupAndRegister to keep its stack depth in range.
+    function _mintLiquidity(
+        address positionManager_,
+        address token,
+        address token0,
+        address token1,
+        address pool
+    ) private returns (uint256 tokenId) {
+        int24   tickLower;
+        int24   tickUpper;
+        uint256 amount0Desired;
+        uint256 amount1Desired;
+
+        // Reuse tickLower as a temp for currentTick — one fewer stack slot.
+        (, tickLower,,,,,) = IUniswapV3Pool(pool).slot0();
+
+        if (token == token0) {
+            // SparkToken is token0 → held as token0 when currentTick >= tickUpper.
+            tickUpper      = _floorToTickSpacing(tickLower); // <= currentTick ✓
+            tickLower      = MIN_TICK;
+            amount0Desired = POOL_TOKENS;
+            amount1Desired = 0;
+        } else {
+            // SparkToken is token1 → held as token1 when currentTick < tickLower.
+            tickLower      = _floorToTickSpacing(tickLower) + TICK_SPACING; // > currentTick ✓
+            tickUpper      = MAX_TICK;
+            amount0Desired = 0;
+            amount1Desired = POOL_TOKENS;
+        }
+
+        _safeApprove(token, positionManager_, POOL_TOKENS);
+
+        (tokenId,,,) = INonfungiblePositionManager(positionManager_).mint(
+            INonfungiblePositionManager.MintParams({
+                token0:         token0,
+                token1:         token1,
+                fee:            FEE_TIER,
+                tickLower:      tickLower,
+                tickUpper:      tickUpper,
+                amount0Desired: amount0Desired,
+                amount1Desired: amount1Desired,
+                amount0Min:     0,
+                amount1Min:     0,
+                recipient:      address(locker),
+                deadline:       block.timestamp
+            })
+        );
+    }
 
     function _deployAndInit(
         string calldata name_,
