@@ -332,23 +332,14 @@ contract SparkLauncher {
         // Tick setup + mint extracted to avoid stack-too-deep in legacy codegen.
         tokenId = _mintLiquidity(dex.positionManager, token, token0, token1, pool);
 
-        address feeWallet = feeWallet_ == address(0) ? msg.sender : feeWallet_;
-        locker.registerPosition(token, tokenId, feeWallet, token0, token1, pool, dex.positionManager);
+        locker.registerPosition(
+            token, tokenId,
+            feeWallet_ == address(0) ? msg.sender : feeWallet_,
+            token0, token1, pool, dex.positionManager
+        );
 
-        // Instant buy: swap any excess quote tokens for SparkTokens → creator.
-        if (extraQuote > 0) {
-            _safeApprove(quoteToken_, dex.router, extraQuote);
-            ISwapRouter(dex.router).exactInputSingle(ISwapRouter.ExactInputSingleParams({
-                tokenIn:           quoteToken_,
-                tokenOut:          token,
-                fee:               FEE_TIER,
-                recipient:         msg.sender,
-                deadline:          block.timestamp,
-                amountIn:          extraQuote,
-                amountOutMinimum:  0,
-                sqrtPriceLimitX96: 0
-            }));
-        }
+        // Instant buy extracted to avoid stack-too-deep during ExactInputSingleParams construction.
+        if (extraQuote > 0) _doInstantBuy(dex.router, quoteToken_, token, extraQuote);
 
         // Creator allocation: ~0.01 % + any mint dust remaining in this contract.
         uint256 creatorTokens = ISparkToken(token).balanceOf(address(this));
@@ -357,10 +348,35 @@ contract SparkLauncher {
         // Renounce ownership immediately — token is permanently ownerless after launch.
         ISparkToken(token).renounceOwnership();
 
-        emit TokenLaunched(token, msg.sender, factory_, quoteToken_, feeWallet, pool, tokenId);
+        emit TokenLaunched(
+            token, msg.sender, factory_, quoteToken_,
+            feeWallet_ == address(0) ? msg.sender : feeWallet_,
+            pool, tokenId
+        );
     }
 
     receive() external payable {}
+
+    // Approves and executes the instant-buy swap. Extracted from _setupAndRegister to keep
+    // its stack depth in range when building the ExactInputSingleParams struct literal.
+    function _doInstantBuy(
+        address router_,
+        address quoteToken_,
+        address token,
+        uint256 extraQuote
+    ) private {
+        _safeApprove(quoteToken_, router_, extraQuote);
+        ISwapRouter(router_).exactInputSingle(ISwapRouter.ExactInputSingleParams({
+            tokenIn:           quoteToken_,
+            tokenOut:          token,
+            fee:               FEE_TIER,
+            recipient:         msg.sender,
+            deadline:          block.timestamp,
+            amountIn:          extraQuote,
+            amountOutMinimum:  0,
+            sqrtPriceLimitX96: 0
+        }));
+    }
 
     // Reads the post-initialize tick, builds the one-sided tick range, approves, and mints
     // the LP position. Extracted from _setupAndRegister to keep its stack depth in range.
