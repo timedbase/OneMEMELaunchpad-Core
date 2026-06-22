@@ -139,6 +139,8 @@ contract SparkLauncher {
     event LaunchFeeSet(address indexed token, uint256 fee);
     event MarketCapRefSet(address indexed token, uint256 marketCapRef);
     event DecimalsSet(address indexed token, uint8 decimals);
+    event ETHRescued(address indexed to, uint256 amount);
+    event ERC20Rescued(address indexed token, address indexed to, uint256 amount);
 
     modifier onlyOwner() { if (msg.sender != owner) revert NotOwner(); _; }
 
@@ -253,6 +255,24 @@ contract SparkLauncher {
         if (!quoteTokens[token_].enabled) revert UnsupportedQuoteToken();
         quoteTokens[token_].enabled = false;
         emit QuoteTokenDisabled(token_);
+    }
+
+    // Recover ETH that became stuck in this contract (e.g. from a failed launch mid-flight).
+    function rescueETH(address to_, uint256 amount_) external onlyOwner {
+        if (to_     == address(0)) revert ZeroAddress();
+        if (amount_ == 0)         revert ZeroAmount();
+        (bool ok,) = to_.call{value: amount_}("");
+        if (!ok) revert TransferFailed();
+        emit ETHRescued(to_, amount_);
+    }
+
+    // Recover ERC-20 tokens that became stuck in this contract.
+    function rescueERC20(address token_, address to_, uint256 amount_) external onlyOwner {
+        if (token_  == address(0)) revert ZeroAddress();
+        if (to_     == address(0)) revert ZeroAddress();
+        if (amount_ == 0)         revert ZeroAmount();
+        _safeTransfer(token_, to_, amount_);
+        emit ERC20Rescued(token_, to_, amount_);
     }
 
     function launch(
