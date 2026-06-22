@@ -298,26 +298,23 @@ contract SparkLauncher {
         DexConfig memory dex = dexes[factory_];
         if (!dex.enabled) revert UnsupportedDex();
 
-        address feeWallet = feeWallet_ == address(0) ? msg.sender : feeWallet_;
-
         QuoteToken memory qt = quoteTokens[quoteToken_];
         if (!qt.enabled) revert UnsupportedQuoteToken();
 
-        uint256 quoteFee   = qt.launchFee;
-        uint256 extraQuote; // amount of quoteToken available for instant buy
+        uint256 extraQuote;
 
         // Collect payment and route launch fee to platform wallet.
         if (qt.isNative) {
-            if (msg.value < quoteFee) revert WrongFee();
+            if (msg.value < qt.launchFee) revert WrongFee();
             IWETH(weth).deposit{value: msg.value}();
-            extraQuote = msg.value - quoteFee;
+            extraQuote = msg.value - qt.launchFee;
         } else {
             if (msg.value != 0) revert UnexpectedETH();
-            _pullFrom(quoteToken_, msg.sender, quoteFee + extraBuy_);
+            _pullFrom(quoteToken_, msg.sender, qt.launchFee + extraBuy_);
             extraQuote = extraBuy_;
         }
         // Fee goes to platform wallet — not into the pool.
-        _safeTransfer(quoteToken_, launchFeeWallet, quoteFee);
+        _safeTransfer(quoteToken_, launchFeeWallet, qt.launchFee);
 
         // Determine token ordering (V3 requires token0 < token1 by address).
         (address token0, address token1) = token < quoteToken_
@@ -332,9 +329,6 @@ contract SparkLauncher {
         // Initialise at a price targeting qt.marketCapRef for the full TOTAL_SUPPLY.
         IUniswapV3Pool(pool).initialize(_computeSqrtPriceX96(token, quoteToken_, qt.marketCapRef));
 
-        // Read the initialised tick so we can build a one-sided tick range.
-        (, int24 currentTick,,,,,) = IUniswapV3Pool(pool).slot0();
-
         // One-sided mint: only SparkToken enters the pool.
         //   SparkToken = token0 → position held as token0 when currentTick >= tickUpper.
         //   SparkToken = token1 → position held as token1 when currentTick <  tickLower.
@@ -343,13 +337,16 @@ contract SparkLauncher {
         uint256 amount0Desired;
         uint256 amount1Desired;
 
+        // Reuse tickLower as a temporary for currentTick to avoid an extra stack slot.
+        (, tickLower,,,,,) = IUniswapV3Pool(pool).slot0();
+
         if (token < quoteToken_) {
+            tickUpper      = _floorToTickSpacing(tickLower); // <= currentTick ✓
             tickLower      = MIN_TICK;
-            tickUpper      = _floorToTickSpacing(currentTick); // <= currentTick ✓
             amount0Desired = POOL_TOKENS;
             amount1Desired = 0;
         } else {
-            tickLower      = _floorToTickSpacing(currentTick) + TICK_SPACING; // > currentTick ✓
+            tickLower      = _floorToTickSpacing(tickLower) + TICK_SPACING; // > currentTick ✓
             tickUpper      = MAX_TICK;
             amount0Desired = 0;
             amount1Desired = POOL_TOKENS;
@@ -373,6 +370,7 @@ contract SparkLauncher {
             })
         );
 
+        address feeWallet = feeWallet_ == address(0) ? msg.sender : feeWallet_;
         locker.registerPosition(token, tokenId, feeWallet, token0, token1, pool, dex.positionManager);
 
         // Instant buy: swap any excess quote tokens for SparkTokens → creator.
