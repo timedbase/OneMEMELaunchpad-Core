@@ -249,7 +249,6 @@ constructor(
 | `setFeeBps(creator, platform, charity)` | Update fee split; must sum to 10 000 |
 | `claimAllFees()` | Sweep all positions; skips failures |
 | `claimFeesRange(from, to)` | Paginated sweep of `allTokens[from..to)` |
-| `emergencyWithdraw(token)` | Transfers a launched token's locked LP NFT to `platformWallet`, bypassing the normal "locked forever" position lifecycle. No timelock or restriction on when it can be called — an owner-trust escape hatch, not a routine function. |
 | `transferOwnership(newOwner)` | Transfer locker admin |
 
 ### SparkLocker (fee wallet or owner)

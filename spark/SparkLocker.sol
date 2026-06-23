@@ -10,7 +10,6 @@ interface IPositionManager {
     }
     function collect(CollectParams calldata params)
         external payable returns (uint256 amount0, uint256 amount1);
-    function safeTransferFrom(address from, address to, uint256 tokenId) external;
     function positions(uint256 tokenId) external view returns (
         uint96  nonce,
         address operator,
@@ -102,7 +101,6 @@ contract SparkLocker {
     event CharityWalletSet(address indexed wallet);
     event FeeBpsUpdated(uint256 creatorBps, uint256 platformBps, uint256 charityBps);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
-    event EmergencyWithdraw(address indexed token, address indexed to, uint256 tokenId);
 
     modifier onlyOwner()    { if (msg.sender != owner)    revert NotOwner();    _; }
     modifier onlyLauncher() { if (msg.sender != launcher) revert NotLauncher(); _; }
@@ -198,16 +196,6 @@ contract SparkLocker {
 
     function tokenCount() external view returns (uint256) {
         return allTokens.length;
-    }
-
-    function emergencyWithdraw(address token) external onlyOwner {
-        Position storage pos = positions[token];
-        if (pos.tokenId == 0) revert UnknownToken();
-        uint256 tokenId         = pos.tokenId;
-        address positionManager = pos.positionManager;
-        delete positions[token]; // clears tokenId so fee-claim loops skip gracefully
-        IPositionManager(positionManager).safeTransferFrom(address(this), platformWallet, tokenId);
-        emit EmergencyWithdraw(token, platformWallet, tokenId);
     }
 
     // Returns the creator's share of currently uncollected fees using V3 fee-growth math.
