@@ -31,7 +31,7 @@ interface IUniswapV3PoolFees {
     function slot0() external view returns (
         uint160 sqrtPriceX96, int24 tick, uint16 observationIndex,
         uint16  observationCardinality, uint16 observationCardinalityNext,
-        uint8   feeProtocol, bool unlocked
+        uint32  feeProtocol, bool unlocked // PancakeSwap V3 packs this wider than uint8
     );
     function feeGrowthGlobal0X128() external view returns (uint256);
     function feeGrowthGlobal1X128() external view returns (uint256);

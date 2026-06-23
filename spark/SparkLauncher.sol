@@ -34,7 +34,7 @@ interface IUniswapV3Pool {
         uint16  observationIndex,
         uint16  observationCardinality,
         uint16  observationCardinalityNext,
-        uint8   feeProtocol,
+        uint32  feeProtocol, // PancakeSwap V3 packs this wider than vanilla Uniswap V3's uint8
         bool    unlocked
     );
 }
@@ -75,6 +75,18 @@ interface ISwapRouter {
     }
     function exactInputSingle(ExactInputSingleParams calldata params)
         external payable returns (uint256 amountOut);
+
+    // Multi-hop variant — used when the quote token isn't WETH, routing
+    // WETH -> quoteToken -> sparkToken through whatever pools already exist.
+    struct ExactInputParams {
+        bytes   path;
+        address recipient;
+        uint256 deadline;
+        uint256 amountIn;
+        uint256 amountOutMinimum;
+    }
+    function exactInput(ExactInputParams calldata params)
+        external payable returns (uint256 amountOut);
 }
 
 contract SparkLauncher {
@@ -83,16 +95,15 @@ contract SparkLauncher {
     error UnsupportedQuoteToken();
     error UnsupportedDex();
     error WrongFee();
-    error UnexpectedETH();
     error ZeroAddress();
     error ZeroAmount();
     error CloneFailed();
     error PoolAlreadyExists();
     error TransferFailed();
     error ApprovalFailed();
+    error InvalidTickRange();
 
-    uint256 public constant TOTAL_SUPPLY = 1_000_000_000e18;
-    uint256 public constant POOL_TOKENS  =   999_900_000e18; // 99.99 % seeded one-sided
+    uint256 public constant TOTAL_SUPPLY = 1_000_000_000e18; // 100 % seeded one-sided into the pool
 
     uint24 private constant FEE_TIER     = 10_000; // 1 % V3 tier
     int24  private constant MIN_TICK     = -887_200;
@@ -106,11 +117,10 @@ contract SparkLauncher {
     }
 
     struct QuoteToken {
-        uint256 launchFee;    // raw units of the token
         uint256 marketCapRef; // reference amount (raw units) targeting the desired launch market cap
-        uint8   decimals;
+        uint24  wethPairFee;  // fee tier of the existing WETH/quoteToken pool, for multihop instant-buy
+                               // routing when quoteToken != WETH; unused when quoteToken == WETH
         bool    enabled;
-        bool    isNative;     // true → fee paid in ETH, WETH used as quote
     }
 
     mapping(address => DexConfig)  public dexes;
@@ -121,6 +131,7 @@ contract SparkLauncher {
     ISparkLocker public immutable locker;
     address      public owner;
     address      public launchFeeWallet; // receives platform launch fees
+    uint256      public launchFee;       // charged in native ETH/BNB on every launch, regardless of quote token
 
     event TokenLaunched(
         address indexed token,
@@ -133,12 +144,11 @@ contract SparkLauncher {
     );
     event DexAdded(address indexed factory, address positionManager, address router);
     event DexDisabled(address indexed factory);
-    event QuoteTokenAdded(address indexed token, uint256 fee, uint8 decimals, uint256 marketCapRef);
+    event QuoteTokenAdded(address indexed token, uint256 marketCapRef, uint24 wethPairFee);
     event QuoteTokenDisabled(address indexed token);
     event LaunchFeeWalletSet(address indexed wallet);
-    event LaunchFeeSet(address indexed token, uint256 fee);
+    event LaunchFeeSet(uint256 fee);
     event MarketCapRefSet(address indexed token, uint256 marketCapRef);
-    event DecimalsSet(address indexed token, uint8 decimals);
     event ETHRescued(address indexed to, uint256 amount);
     event ERC20Rescued(address indexed token, address indexed to, uint256 amount);
 
@@ -151,7 +161,8 @@ contract SparkLauncher {
         address launchFeeWallet_,
         address initialFactory_,
         address initialPositionMgr_,
-        address initialRouter_
+        address initialRouter_,
+        uint256 launchFee_
     ) {
         if (weth_               == address(0)) revert ZeroAddress();
         if (tokenImpl_          == address(0)) revert ZeroAddress();
@@ -160,12 +171,14 @@ contract SparkLauncher {
         if (initialFactory_     == address(0)) revert ZeroAddress();
         if (initialPositionMgr_ == address(0)) revert ZeroAddress();
         if (initialRouter_      == address(0)) revert ZeroAddress();
+        if (launchFee_          == 0)          revert ZeroAmount();
 
         owner           = msg.sender;
         weth            = weth_;
         tokenImpl       = tokenImpl_;
         locker          = ISparkLocker(locker_);
         launchFeeWallet = launchFeeWallet_;
+        launchFee       = launchFee_;
 
         dexes[initialFactory_] = DexConfig({
             positionManager: initialPositionMgr_,
@@ -175,11 +188,9 @@ contract SparkLauncher {
         emit DexAdded(initialFactory_, initialPositionMgr_, initialRouter_);
 
         quoteTokens[weth_] = QuoteToken({
-            launchFee:    0.0005 ether,
             marketCapRef: 5e18,          // ~5 ETH market cap at launch
-            decimals:     18,
-            enabled:      true,
-            isNative:     true
+            wethPairFee:  0,             // unused — quote token is WETH itself, no hop needed
+            enabled:      true
         });
     }
 
@@ -194,11 +205,10 @@ contract SparkLauncher {
         emit LaunchFeeWalletSet(wallet);
     }
 
-    function setLaunchFee(address token_, uint256 fee_) external onlyOwner {
-        if (!quoteTokens[token_].enabled) revert UnsupportedQuoteToken();
+    function setLaunchFee(uint256 fee_) external onlyOwner {
         if (fee_ == 0) revert ZeroAmount();
-        quoteTokens[token_].launchFee = fee_;
-        emit LaunchFeeSet(token_, fee_);
+        launchFee = fee_;
+        emit LaunchFeeSet(fee_);
     }
 
     function setMarketCapRef(address token_, uint256 ref_) external onlyOwner {
@@ -206,12 +216,6 @@ contract SparkLauncher {
         if (ref_ == 0) revert ZeroAmount();
         quoteTokens[token_].marketCapRef = ref_;
         emit MarketCapRefSet(token_, ref_);
-    }
-
-    function setDecimals(address token_, uint8 decimals_) external onlyOwner {
-        if (!quoteTokens[token_].enabled) revert UnsupportedQuoteToken();
-        quoteTokens[token_].decimals = decimals_;
-        emit DecimalsSet(token_, decimals_);
     }
 
     function addDex(address factory_, address positionMgr_, address router_) external onlyOwner {
@@ -234,21 +238,18 @@ contract SparkLauncher {
 
     function addQuoteToken(
         address token_,
-        uint256 fee_,
-        uint8   decimals_,
-        uint256 marketCapRef_
+        uint256 marketCapRef_,
+        uint24  wethPairFee_
     ) external onlyOwner {
         if (token_        == address(0)) revert ZeroAddress();
-        if (fee_          == 0)          revert ZeroAmount();
         if (marketCapRef_ == 0)          revert ZeroAmount();
+        if (token_ != weth && wethPairFee_ == 0) revert ZeroAmount(); // needed for multihop routing
         quoteTokens[token_] = QuoteToken({
-            launchFee:    fee_,
             marketCapRef: marketCapRef_,
-            decimals:     decimals_,
-            enabled:      true,
-            isNative:     (token_ == weth)
+            wethPairFee:  wethPairFee_,
+            enabled:      true
         });
-        emit QuoteTokenAdded(token_, fee_, decimals_, marketCapRef_);
+        emit QuoteTokenAdded(token_, marketCapRef_, wethPairFee_);
     }
 
     function disableQuoteToken(address token_) external onlyOwner {
@@ -281,49 +282,48 @@ contract SparkLauncher {
         string calldata metaURI_,
         address         feeWallet_,
         address         factory_,
-        address         quoteToken_,
-        uint256         extraBuy_    // extra quote tokens for instant buy (ERC-20 only; native uses msg.value excess)
+        address         quoteToken_
     ) external payable returns (address token, address pool, uint256 tokenId) {
         token = _deployAndInit(name_, symbol_, metaURI_);
-        (pool, tokenId) = _setupAndRegister(token, feeWallet_, factory_, quoteToken_, extraBuy_);
+        (pool, tokenId) = _setupAndRegister(token, feeWallet_, factory_, quoteToken_);
     }
 
     function _setupAndRegister(
         address token,
         address feeWallet_,
         address factory_,
-        address quoteToken_,
-        uint256 extraBuy_
+        address quoteToken_
     ) private returns (address pool, uint256 tokenId) {
         // Access dex/quote config directly from storage — avoids two memory-pointer stack slots
         // that legacy codegen would keep live for the entire function body.
-        if (!dexes[factory_].enabled)       revert UnsupportedDex();
-        if (!quoteTokens[quoteToken_].enabled) revert UnsupportedQuoteToken();
+        if (!dexes[factory_].enabled)          revert UnsupportedDex();
+        if (!quoteTokens[quoteToken_].enabled)  revert UnsupportedQuoteToken();
+        if (msg.value < launchFee)              revert WrongFee();
 
-        uint256 extraQuote;
-
-        // Collect payment and route launch fee to platform wallet.
-        if (quoteTokens[quoteToken_].isNative) {
-            if (msg.value < quoteTokens[quoteToken_].launchFee) revert WrongFee();
-            IWETH(weth).deposit{value: msg.value}();
-            extraQuote = msg.value - quoteTokens[quoteToken_].launchFee;
-        } else {
-            if (msg.value != 0) revert UnexpectedETH();
-            _pullFrom(quoteToken_, msg.sender, quoteTokens[quoteToken_].launchFee + extraBuy_);
-            extraQuote = extraBuy_;
-        }
-        // Fee goes to platform wallet — not into the pool.
-        _safeTransfer(quoteToken_, launchFeeWallet, quoteTokens[quoteToken_].launchFee);
+        // Fee is always charged in native ETH/BNB, regardless of quote token — sent straight
+        // to the platform wallet, never touching the pool. Anything above the fee is spent on
+        // an instant buy after the pool is seeded.
+        (bool feeOk,) = launchFeeWallet.call{value: launchFee}("");
+        if (!feeOk) revert TransferFailed();
+        uint256 extraEth = msg.value - launchFee;
 
         // Determine token ordering (V3 requires token0 < token1 by address).
         (address token0, address token1) = token < quoteToken_
             ? (token,       quoteToken_)
             : (quoteToken_, token      );
 
-        if (IUniswapV3Factory(factory_).getPool(token0, token1, FEE_TIER) != address(0))
-            revert PoolAlreadyExists();
-
-        pool = IUniswapV3Factory(factory_).createPool(token0, token1, FEE_TIER);
+        // A pool can already exist at this (token0, token1, FEE_TIER) key if someone front-ran
+        // createPool() with our predicted clone address — createPool() is permissionless on the
+        // DEX factory. An uninitialized shell is harmless: we just adopt and initialize it
+        // ourselves. Only a pool someone has *already initialized* is a genuine collision.
+        address existingPool = IUniswapV3Factory(factory_).getPool(token0, token1, FEE_TIER);
+        if (existingPool == address(0)) {
+            pool = IUniswapV3Factory(factory_).createPool(token0, token1, FEE_TIER);
+        } else {
+            (uint160 existingPrice,,,,,,) = IUniswapV3Pool(existingPool).slot0();
+            if (existingPrice != 0) revert PoolAlreadyExists();
+            pool = existingPool;
+        }
 
         // Initialise at a price targeting marketCapRef for the full TOTAL_SUPPLY.
         IUniswapV3Pool(pool).initialize(
@@ -339,9 +339,12 @@ contract SparkLauncher {
         );
 
         // Instant buy extracted to avoid stack-too-deep during ExactInputSingleParams construction.
-        if (extraQuote > 0) _doInstantBuy(dexes[factory_].router, quoteToken_, token, extraQuote);
+        if (extraEth > 0) {
+            _doInstantBuy(dexes[factory_].router, quoteToken_, token, extraEth, quoteTokens[quoteToken_].wethPairFee);
+        }
 
-        // Creator allocation: ~0.01 % + any mint dust remaining in this contract.
+        // Sweep any mint-rounding dust left in this contract back to the creator — the
+        // full supply is seeded one-sided, so no deliberate allocation is held back.
         uint256 creatorTokens = ISparkToken(token).balanceOf(address(this));
         if (creatorTokens > 0) ISparkToken(token).transfer(msg.sender, creatorTokens);
 
@@ -357,25 +360,40 @@ contract SparkLauncher {
 
     receive() external payable {}
 
-    // Approves and executes the instant-buy swap. Extracted from _setupAndRegister to keep
-    // its stack depth in range when building the ExactInputSingleParams struct literal.
+    // Wraps the excess ETH to WETH and buys spark tokens for the creator. Direct single-hop
+    // swap when the quote token is WETH itself; otherwise multihops WETH -> quoteToken ->
+    // sparkToken through whichever pools already exist (quoteToken/sparkToken is the one we
+    // just seeded; WETH/quoteToken must already have real liquidity on this DEX).
     function _doInstantBuy(
         address router_,
         address quoteToken_,
         address token,
-        uint256 extraQuote
+        uint256 extraEth,
+        uint24  wethPairFee
     ) private {
-        _safeApprove(quoteToken_, router_, extraQuote);
-        ISwapRouter(router_).exactInputSingle(ISwapRouter.ExactInputSingleParams({
-            tokenIn:           quoteToken_,
-            tokenOut:          token,
-            fee:               FEE_TIER,
-            recipient:         msg.sender,
-            deadline:          block.timestamp,
-            amountIn:          extraQuote,
-            amountOutMinimum:  0,
-            sqrtPriceLimitX96: 0
-        }));
+        IWETH(weth).deposit{value: extraEth}();
+        _safeApprove(weth, router_, extraEth);
+
+        if (quoteToken_ == weth) {
+            ISwapRouter(router_).exactInputSingle(ISwapRouter.ExactInputSingleParams({
+                tokenIn:           weth,
+                tokenOut:          token,
+                fee:               FEE_TIER,
+                recipient:         msg.sender,
+                deadline:          block.timestamp,
+                amountIn:          extraEth,
+                amountOutMinimum:  0,
+                sqrtPriceLimitX96: 0
+            }));
+        } else {
+            ISwapRouter(router_).exactInput(ISwapRouter.ExactInputParams({
+                path:             abi.encodePacked(weth, wethPairFee, quoteToken_, FEE_TIER, token),
+                recipient:        msg.sender,
+                deadline:         block.timestamp,
+                amountIn:         extraEth,
+                amountOutMinimum: 0
+            }));
+        }
     }
 
     // Tick setup, mint, and locker registration in one frame.
@@ -390,29 +408,30 @@ contract SparkLauncher {
         address pool
     ) private returns (uint256 tokenId) {
         {
+            int24   currentTick;
             int24   tickLower;
             int24   tickUpper;
             uint256 amount0Desired;
             uint256 amount1Desired;
 
-            // Reuse tickLower as a temp for currentTick — one fewer stack slot.
-            (, tickLower,,,,,) = IUniswapV3Pool(pool).slot0();
+            (, currentTick,,,,,) = IUniswapV3Pool(pool).slot0();
 
             if (token == token0) {
-                // SparkToken is token0 → held as token0 when currentTick >= tickUpper.
-                tickUpper      = _floorToTickSpacing(tickLower); // <= currentTick ✓
-                tickLower      = MIN_TICK;
-                amount0Desired = POOL_TOKENS;
+                // SparkToken is token0 → deposit only token0 by placing the active range above current tick.
+                tickLower      = _floorToTickSpacing(currentTick) + TICK_SPACING; // > currentTick ✓
+                tickUpper      = MAX_TICK;
+                amount0Desired = TOTAL_SUPPLY;
                 amount1Desired = 0;
             } else {
-                // SparkToken is token1 → held as token1 when currentTick < tickLower.
-                tickLower      = _floorToTickSpacing(tickLower) + TICK_SPACING; // > currentTick ✓
-                tickUpper      = MAX_TICK;
+                // SparkToken is token1 → deposit only token1 by placing the active range below current tick.
+                tickLower      = MIN_TICK;
+                tickUpper      = _floorToTickSpacing(currentTick); // <= currentTick ✓
                 amount0Desired = 0;
-                amount1Desired = POOL_TOKENS;
+                amount1Desired = TOTAL_SUPPLY;
             }
+            if (tickLower >= tickUpper) revert InvalidTickRange();
 
-            _safeApprove(token, positionManager_, POOL_TOKENS);
+            _safeApprove(token, positionManager_, TOTAL_SUPPLY);
 
             (tokenId,,,) = INonfungiblePositionManager(positionManager_).mint(
                 INonfungiblePositionManager.MintParams({
@@ -439,7 +458,11 @@ contract SparkLauncher {
         string calldata symbol_,
         string calldata metaURI_
     ) private returns (address token) {
-        token = _clone(tokenImpl);
+        // Salted by caller + block + the launch params themselves, so the resulting clone
+        // address can't be precomputed and squatted ahead of time by an unrelated third party
+        // scanning a predictable counter — only by racing this exact pending transaction.
+        bytes32 salt = keccak256(abi.encodePacked(msg.sender, block.timestamp, name_, symbol_, metaURI_));
+        token = _clone(tokenImpl, salt);
         ISparkToken(token).initSpark(name_, symbol_, metaURI_, address(this));
     }
 
@@ -466,7 +489,9 @@ contract SparkLauncher {
     }
 
     // EIP-1167 minimal proxy — 55-byte deployment (10 creation + 45 runtime).
-    function _clone(address impl) private returns (address instance) {
+    // CREATE2 (not CREATE) so the resulting address depends on `salt`, not just this
+    // contract's nonce — see _deployAndInit for why that matters.
+    function _clone(address impl, bytes32 salt) private returns (address instance) {
         assembly {
             let ptr := mload(0x40)
             mstore(ptr,
@@ -474,7 +499,7 @@ contract SparkLauncher {
             mstore(add(ptr, 0x14), shl(0x60, impl))
             mstore(add(ptr, 0x28),
                 0x5af43d82803e903d91602b57fd5bf30000000000000000000000000000000000)
-            instance := create(0, ptr, 0x37)
+            instance := create2(0, ptr, 0x37, salt)
         }
         if (instance == address(0)) revert CloneFailed();
     }
@@ -498,18 +523,10 @@ contract SparkLauncher {
 
     // Reset allowance to 0 before setting — handles USDT's non-zero→non-zero restriction.
     function _safeApprove(address token_, address spender, uint256 amount) private {
-        (bool _ok,) = token_.call(abi.encodeWithSelector(0x095ea7b3, spender, 0));
-        _ok;
-        (bool ok,)  = token_.call(abi.encodeWithSelector(0x095ea7b3, spender, amount));
-        if (!ok) revert ApprovalFailed();
-    }
-
-    // transferFrom(address,address,uint256)
-    function _pullFrom(address token_, address from, uint256 amount) private {
-        (bool ok, bytes memory data) = token_.call(
-            abi.encodeWithSelector(0x23b872dd, from, address(this), amount)
-        );
-        if (!ok || (data.length > 0 && !abi.decode(data, (bool)))) revert TransferFailed();
+        (bool reset,) = token_.call(abi.encodeWithSelector(0x095ea7b3, spender, 0));
+        reset;
+        (bool ok, bytes memory data) = token_.call(abi.encodeWithSelector(0x095ea7b3, spender, amount));
+        if (!ok || (data.length > 0 && !abi.decode(data, (bool)))) revert ApprovalFailed();
     }
 
     // transfer(address,uint256) — USDT-safe (handles missing return value).
