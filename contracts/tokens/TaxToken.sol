@@ -38,7 +38,7 @@ interface IERC20Rescue {
 contract TaxToken is ILaunchpadToken {
 
     error NotOwner();
-    error NotFactory();
+    error NotLaunchManager();
     error AlreadyInitialized();
     error ZeroAddress();
     error ZeroAmount();
@@ -49,17 +49,18 @@ contract TaxToken is ILaunchpadToken {
     error InsufficientBalance();
     error NothingToSwap();
     error CannotRescueOwnToken();
-    error BondingPhaseActive();
+    error LaunchPhaseActive();
     error BNBTransferFailed();
     error TokenRescueFailed();
     error PermitExpired();
     error InvalidSignature();
+    error LaunchPhaseTransferRestricted();
 
     address private _owner;
-    address public factory;
-    address public migrator;
+    address public launchManager;
+    address public creatorVault;
     bool    private _initialized;
-    bool    private _inBondingPhase;
+    bool    private _inLaunchPhase;
 
     string  private _name;
     string  private _symbol;
@@ -118,7 +119,7 @@ contract TaxToken is ILaunchpadToken {
 
     modifier lockSwap()   { inSwap = true; _; inSwap = false; }
     modifier onlyOwner()  { if (msg.sender != _owner)   revert NotOwner();   _; }
-    modifier onlyFactoryOrCurve() { if (msg.sender != factory && msg.sender != migrator) revert NotFactory(); _; }
+    modifier onlyLaunchManager() { if (msg.sender != launchManager) revert NotLaunchManager(); _; }
 
     constructor() { _initialized = true; }
 
@@ -126,23 +127,21 @@ contract TaxToken is ILaunchpadToken {
         string    calldata name_,
         string    calldata symbol_,
         uint256            totalSupply_,
-        address            factory_,
-        address            migrator_,
+        address            launchManager_,
         address            tokenOwner_,
         string    calldata metaURI_,
         address            router_,
-        address            vestingWallet_
+        address            creatorVault_
     ) external {
-        if (_initialized)               revert AlreadyInitialized();
-        if (factory_      == address(0)) revert ZeroAddress();
-        if (migrator_ == address(0)) revert ZeroAddress();
-        if (tokenOwner_   == address(0)) revert ZeroAddress();
-        if (router_       == address(0)) revert ZeroAddress();
+        if (_initialized)                  revert AlreadyInitialized();
+        if (launchManager_ == address(0))  revert ZeroAddress();
+        if (tokenOwner_     == address(0)) revert ZeroAddress();
+        if (router_         == address(0)) revert ZeroAddress();
 
         _initialized    = true;
-        _inBondingPhase = true;
-        factory        = factory_;
-        migrator   = migrator_;
+        _inLaunchPhase = true;
+        launchManager  = launchManager_;
+        creatorVault   = creatorVault_;
         _owner          = tokenOwner_;
 
         _name        = name_;
@@ -156,12 +155,11 @@ contract TaxToken is ILaunchpadToken {
         swapThreshold = totalSupply_ / 1000;
         swapEnabled   = false;
 
-        _isExcludedFromFee[factory_]       = true;
-        _isExcludedFromFee[migrator_]  = true;
+        _isExcludedFromFee[launchManager_] = true;
         _isExcludedFromFee[tokenOwner_]    = true;
         _isExcludedFromFee[address(this)]  = true;
         _isExcludedFromFee[BURN_ADDRESS]   = true;
-        if (vestingWallet_ != address(0)) _isExcludedFromFee[vestingWallet_] = true;
+        if (creatorVault_ != address(0)) _isExcludedFromFee[creatorVault_] = true;
 
         _metaURI = metaURI_;
 
@@ -169,8 +167,8 @@ contract TaxToken is ILaunchpadToken {
         pancakeRouter = IPancakeRouter02TT(router_);
         pancakePair   = IPancakeFactoryTT(pancakeRouter.factory()).createPair(address(this), pancakeRouter.WETH());
 
-        _balances[factory_] = totalSupply_;
-        emit Transfer(address(0), factory_, totalSupply_);
+        _balances[launchManager_] = totalSupply_;
+        emit Transfer(address(0), launchManager_, totalSupply_);
         emit OwnershipTransferred(address(0), tokenOwner_);
 
         _cachedChainId    = block.chainid;
@@ -184,9 +182,9 @@ contract TaxToken is ILaunchpadToken {
         emit MetaURIUpdated(uri_);
     }
 
-    function postMigrateSetup() external onlyFactoryOrCurve {
-        if (!_inBondingPhase) revert DexAlreadyConfigured();
-        _inBondingPhase = false;
+    function postMigrateSetup() external onlyLaunchManager {
+        if (!_inLaunchPhase) revert DexAlreadyConfigured();
+        _inLaunchPhase = false;
         swapEnabled     = true;
         emit DexConfigured(pancakePair, address(pancakeRouter));
     }
@@ -223,11 +221,16 @@ contract TaxToken is ILaunchpadToken {
     function _transfer(address from, address to, uint256 amount) private {
         if (from == address(0) || to == address(0)) revert ZeroAddress();
         if (amount == 0)                            revert ZeroAmount();
+        if (_inLaunchPhase) {
+            bool fromApproved = from == launchManager || from == creatorVault;
+            bool toApproved   = to   == launchManager || to   == creatorVault;
+            if (!fromApproved && !toApproved) revert LaunchPhaseTransferRestricted();
+        }
         if (_balances[from] < amount)               revert InsufficientBalance();
 
         bool takeFee = !(_isExcludedFromFee[from] || _isExcludedFromFee[to]);
 
-        if (!_inBondingPhase && swapEnabled && takeFee && !inSwap && from != pancakePair) {
+        if (!_inLaunchPhase && swapEnabled && takeFee && !inSwap && from != pancakePair) {
             uint256 taxBalance = _balances[address(this)];
             if (taxBalance >= swapThreshold) swapAndDistribute(taxBalance);
         }
@@ -249,7 +252,7 @@ contract TaxToken is ILaunchpadToken {
         uint256 burnAmt;
         uint256 taxAmt;
 
-        if (!_inBondingPhase) {
+        if (!_inLaunchPhase) {
             if (isBuy) {
                 burnAmt = (amount * buyBurnTax) / 10000;
                 taxAmt  = (amount * (buyMarketingTax + buyTeamTax + buyTreasuryTax + buyLiquidityTax)) / 10000;
@@ -372,7 +375,7 @@ contract TaxToken is ILaunchpadToken {
     }
 
     function setBuyTaxes(uint256 mkt, uint256 team, uint256 tsy, uint256 burn, uint256 lp) external onlyOwner {
-        if (_inBondingPhase) revert BondingPhaseActive();
+        if (_inLaunchPhase) revert LaunchPhaseActive();
         if (mkt + team + tsy + burn + lp > MAX_TOTAL_TAX) revert TaxExceedsMax();
         buyMarketingTax = mkt; buyTeamTax = team; buyTreasuryTax = tsy;
         buyBurnTax = burn; buyLiquidityTax = lp;
@@ -380,7 +383,7 @@ contract TaxToken is ILaunchpadToken {
     }
 
     function setSellTaxes(uint256 mkt, uint256 team, uint256 tsy, uint256 burn, uint256 lp) external onlyOwner {
-        if (_inBondingPhase) revert BondingPhaseActive();
+        if (_inLaunchPhase) revert LaunchPhaseActive();
         if (mkt + team + tsy + burn + lp > MAX_TOTAL_TAX) revert TaxExceedsMax();
         sellMarketingTax = mkt; sellTeamTax = team; sellTreasuryTax = tsy;
         sellBurnTax = burn; sellLiquidityTax = lp;
@@ -437,7 +440,7 @@ contract TaxToken is ILaunchpadToken {
         return sellMarketingTax + sellTeamTax + sellTreasuryTax + sellBurnTax + sellLiquidityTax;
     }
     function isExcludedFromFee(address a) public view returns (bool) { return _isExcludedFromFee[a]; }
-    function inBondingPhase()             public view returns (bool) { return _inBondingPhase; }
+    function inLaunchPhase()             public view returns (bool) { return _inLaunchPhase; }
 
     receive() external payable {}
 }

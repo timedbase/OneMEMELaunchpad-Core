@@ -23,9 +23,8 @@ const OUT_DIR = path.join(__dirname, 'out');
 
 // ── Source files to compile ──────────────────────────────────────────────────
 const CONTRACT_FILES = [
-  'contracts/BondingCurve.sol',
-  'contracts/LaunchpadFactory.sol',
-  'contracts/VestingWallet.sol',
+  'contracts/Launchpad.sol',
+  'contracts/CreatorVault.sol',
   'contracts/interfaces/ILaunchpadToken.sol',
   'contracts/interfaces/IPancakeRouter02.sol',
   'contracts/interfaces/IPostMigrate.sol',

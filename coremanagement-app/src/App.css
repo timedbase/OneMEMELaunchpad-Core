@@ -1,4 +1,0 @@
-/* Reduce the default space-y-6 gap used across all tab sections from 24px → 16px */
-.space-y-6 > :not([hidden]) ~ :not([hidden]) {
-  margin-top: 1rem !important;
-}

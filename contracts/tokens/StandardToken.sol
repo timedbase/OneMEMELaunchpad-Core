@@ -15,7 +15,7 @@ interface ILaunchpadToken {
 contract StandardToken is ILaunchpadToken {
 
     error NotOwner();
-    error NotFactory();
+    error NotLaunchManager();
     error AlreadyInitialized();
     error ZeroAddress();
     error ZeroAmount();
@@ -26,10 +26,14 @@ contract StandardToken is ILaunchpadToken {
     error CannotRescueOwnToken();
     error PermitExpired();
     error InvalidSignature();
+    error LaunchPhaseAlreadyEnded();
+    error LaunchPhaseTransferRestricted();
 
     bool    private _initialized;
+    bool    private _inLaunchPhase;
     address private _owner;
-    address public  factory;
+    address public  launchManager;
+    address public  creatorVault;
 
     string  private _name;
     string  private _symbol;
@@ -51,11 +55,8 @@ contract StandardToken is ILaunchpadToken {
     event OwnershipTransferred(address indexed prev, address indexed next);
     event MetaURIUpdated(string uri);
 
-    address public migrator;
-
-    modifier onlyFactory()        { if (msg.sender != factory)      revert NotFactory(); _; }
-    modifier onlyFactoryOrCurve() { if (msg.sender != factory && msg.sender != migrator) revert NotFactory(); _; }
-    modifier onlyOwner()          { if (msg.sender != _owner)       revert NotOwner();   _; }
+    modifier onlyLaunchManager() { if (msg.sender != launchManager) revert NotLaunchManager(); _; }
+    modifier onlyOwner()         { if (msg.sender != _owner)        revert NotOwner();   _; }
 
     constructor() { _initialized = true; }
 
@@ -63,27 +64,27 @@ contract StandardToken is ILaunchpadToken {
         string  calldata name_,
         string  calldata symbol_,
         uint256          totalSupply_,
-        address          factory_,
-        address          migrator_,
+        address          launchManager_,
         address          tokenOwner_,
-        string  calldata metaURI_
+        string  calldata metaURI_,
+        address          creatorVault_
     ) external {
-        if (_initialized)               revert AlreadyInitialized();
-        if (factory_      == address(0)) revert ZeroAddress();
-        if (migrator_ == address(0)) revert ZeroAddress();
-        if (tokenOwner_   == address(0)) revert ZeroAddress();
+        if (_initialized)                 revert AlreadyInitialized();
+        if (launchManager_ == address(0)) revert ZeroAddress();
+        if (tokenOwner_     == address(0)) revert ZeroAddress();
         _initialized = true;
+        _inLaunchPhase = true;
 
-        factory      = factory_;
-        migrator = migrator_;
+        launchManager = launchManager_;
+        creatorVault  = creatorVault_;
         _owner       = tokenOwner_;
         _name        = name_;
         _symbol      = symbol_;
         _totalSupply = totalSupply_;
 
         _metaURI     = metaURI_;
-        _balances[factory_] = totalSupply_;
-        emit Transfer(address(0), factory_, totalSupply_);
+        _balances[launchManager_] = totalSupply_;
+        emit Transfer(address(0), launchManager_, totalSupply_);
         emit OwnershipTransferred(address(0), tokenOwner_);
 
         _cachedChainId    = block.chainid;
@@ -97,7 +98,12 @@ contract StandardToken is ILaunchpadToken {
         emit MetaURIUpdated(uri_);
     }
 
-    function postMigrateSetup() external override onlyFactoryOrCurve {}
+    function postMigrateSetup() external override onlyLaunchManager {
+        if (!_inLaunchPhase) revert LaunchPhaseAlreadyEnded();
+        _inLaunchPhase = false;
+    }
+
+    function inLaunchPhase() public view returns (bool) { return _inLaunchPhase; }
 
     function owner() external view returns (address) { return _owner; }
 
@@ -145,6 +151,11 @@ contract StandardToken is ILaunchpadToken {
 
     function _transfer(address from, address to, uint256 amount) private {
         if (from == address(0) || to == address(0)) revert ZeroAddress();
+        if (_inLaunchPhase) {
+            bool fromApproved = from == launchManager || from == creatorVault;
+            bool toApproved   = to   == launchManager || to   == creatorVault;
+            if (!fromApproved && !toApproved) revert LaunchPhaseTransferRestricted();
+        }
         if (_balances[from] < amount) revert InsufficientBalance();
         unchecked {
             _balances[from] -= amount;
