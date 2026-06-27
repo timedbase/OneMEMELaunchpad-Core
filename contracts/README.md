@@ -244,7 +244,141 @@ launchpad.rescueToken(token, to)   // only callable after migration or for unrel
 
 ## Deployment
 
-Constructor parameters (all addresses validated non-zero):
+### Chain Addresses
+
+**BSC Mainnet**
+
+| Contract | Address |
+|---|---|
+| PancakeSwap V2 Router | `0x10ED43C718714eb63d5aA57B78B54704E256024E` |
+| PancakeSwap V3 NonfungiblePositionManager | `0x46A15B0b27311cedF172AB29E4f4766fbE7F4364` |
+| PancakeSwap V3 Factory | `0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865` |
+| WBNB | `0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c` |
+| USDC (18 decimals on BSC) | `0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d` |
+| USDC/WBNB V2 pair (quote pair) | `0xd99c7F6C65857AC913a8f880A4cb84032AB2FC5b` |
+
+**Ethereum Mainnet**
+
+| Contract | Address |
+|---|---|
+| Uniswap V2 Router | `0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D` |
+| Uniswap V3 NonfungiblePositionManager | `0xC36442b4a4522E871399CD717aBDD847Ab11FE88` |
+| Uniswap V3 Factory | `0x1F98431c8aD98523631AE4a59f267346ea31F984` |
+| WETH | `0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2` |
+| USDC (6 decimals on Ethereum) | `0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48` |
+| USDC/WETH V2 pair (quote pair) | `0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc` |
+
+> **USDC decimal difference.** The USD conversion formula divides by the pair's USDC reserve, so `startMarketCapUSD` and `migrationMarketCapUSD` must be denominated to match:
+> - BSC: pass `5000e18` for $5,000 (USDC is 18 decimals)
+> - Ethereum: pass `5000e6` for $5,000 (USDC is 6 decimals)
+>
+> The math cancels correctly on both chains — only the scale the caller uses differs.
+
+---
+
+### Deployment Order
+
+`CreatorVault` needs a `launchManager` address and `Launchpad` needs a `creatorVault` address — a chicken-and-egg dependency. Resolve it by deploying `CreatorVault` first with the deployer as a temporary `launchManager`, then wiring the real address after `Launchpad` is deployed.
+
+**Step 1 — Deploy token implementations**
+
+These are clone targets. Their constructors set `_initialized = true` so they cannot be used directly.
+
+```
+StandardToken.deploy()    → standardImpl
+TaxToken.deploy()         → taxImpl
+ReflectionToken.deploy()  → reflectionImpl
+```
+
+**Step 2 — Deploy CreatorVault**
+
+```
+CreatorVault.deploy(
+    owner_         = DEPLOYER,
+    launchManager_ = DEPLOYER    // temporary; overwritten in step 4
+)  → creatorVault
+```
+
+**Step 3 — Deploy Launchpad**
+
+BSC:
+```
+Launchpad.deploy(
+    router_             = 0x10ED43C718714eb63d5aA57B78B54704E256024E,
+    v3PositionManager_  = 0x46A15B0b27311cedF172AB29E4f4766fbE7F4364,
+    v3Factory_          = 0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865,
+    feeRecipient_       = FEE_WALLET,
+    platformFee_        = <bps>,
+    charityFee_         = <bps>,
+    standardImpl_       = standardImpl,
+    taxImpl_            = taxImpl,
+    reflectionImpl_     = reflectionImpl,
+    creatorVault_       = creatorVault,
+    usdcToken_          = 0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d,
+    usdQuotePair_       = 0xd99c7F6C65857AC913a8f880A4cb84032AB2FC5b,
+    creationFee_        = <wei>
+)  → launchpad
+```
+
+Ethereum:
+```
+Launchpad.deploy(
+    router_             = 0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D,
+    v3PositionManager_  = 0xC36442b4a4522E871399CD717aBDD847Ab11FE88,
+    v3Factory_          = 0x1F98431c8aD98523631AE4a59f267346ea31F984,
+    feeRecipient_       = FEE_WALLET,
+    platformFee_        = <bps>,
+    charityFee_         = <bps>,
+    standardImpl_       = standardImpl,
+    taxImpl_            = taxImpl,
+    reflectionImpl_     = reflectionImpl,
+    creatorVault_       = creatorVault,
+    usdcToken_          = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48,
+    usdQuotePair_       = 0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc,
+    creationFee_        = <wei>
+)  → launchpad
+```
+
+**Step 4 — Wire CreatorVault to Launchpad**
+
+```
+creatorVault.setLaunchManager(launchpad)
+```
+
+This is the critical step. Until it is called, `addVesting` and `registerPosition` will revert for any real launch because the caller check enforces `msg.sender == launchManager`.
+
+---
+
+### Post-Deployment Configuration
+
+All of the following are optional but should be reviewed before going live:
+
+```
+// Fee distribution wallets on CreatorVault (default to owner)
+creatorVault.setPlatformWallet(PLATFORM_WALLET)
+creatorVault.setCharityWallet(CHARITY_WALLET)
+
+// LP fee split between creator / platform / charity (default 70/25/5)
+creatorVault.setFeeBps(creatorBps, platformBps, charityBps)
+
+// Charity portion of bonding-curve fees (default: redirected to feeRecipient)
+launchpad.proposeSetCharityWallet(CHARITY_WALLET)
+// ... wait 48h ...
+launchpad.executeSetCharityWallet()
+
+// Creation fee (instant; 0 by default)
+launchpad.setCreationFee(fee)
+
+// Allocation guardrails (instant)
+launchpad.setAllocationBounds(minCurveBps, minLiquidityBps, maxCreatorBps)
+
+// Supply guardrails (instant)
+launchpad.setSupplyBounds(minSupply, maxSupply)
+```
+
+---
+
+### Launchpad Constructor Parameters
 
 | Parameter | Description |
 |---|---|
@@ -258,11 +392,9 @@ Constructor parameters (all addresses validated non-zero):
 | `taxImpl_` | Deployed `TaxToken` implementation |
 | `reflectionImpl_` | Deployed `ReflectionToken` implementation |
 | `creatorVault_` | Deployed `CreatorVault` |
-| `usdcToken_` | USDC address (`0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d` on BSC — 18 decimals) |
-| `usdQuotePair_` | USDC/WBNB PancakeSwap V2 pair (validated at construction) |
+| `usdcToken_` | USDC address — `0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d` (BSC, 18 dec) / `0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48` (Ethereum, 6 dec) |
+| `usdQuotePair_` | USDC/WNATIVE V2 pair — validated at construction to contain `usdcToken` and the router's WETH |
 | `creationFee_` | BNB required to launch a token (may be 0) |
-
-`CreatorVault` constructor takes `(owner_, launchManager_)`. Both will be the deployer address initially; `launchManager` is updated to the `Launchpad` address after deployment via `setLaunchManager`.
 
 ---
 
